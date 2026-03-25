@@ -1,0 +1,103 @@
+---
+  HISCI-HealthTrust Roster — Survival & Churn Analysis
+
+  Domain: Healthcare membership network — 4,996 member organizations analysed. Note: domain detected by keyword heuristic; this is a
+  GPO (Group Purchasing Organization) / healthcare network roster, not a clinical dataset. The GPO-specific lenses (contract value,
+  NPI linkage) are more relevant than clinical metrics.
+
+  ---
+  What the data represents
+
+  Each row is a healthcare provider organization (hospital, ambulatory practice, home care agency, etc.) whose event is defined as
+  leaving the HealthTrust network (Inactive status). Active members are right-censored at the analysis date (2026-03-25) — they've
+  been observed up to today but haven't churned yet.
+
+  ---
+  Key Findings
+
+  1. The network is highly sticky overall
+
+  ┌──────────┬────────────────┐
+  │ Horizon  │ % Still Active │
+  ├──────────┼────────────────┤
+  │ 1 year   │ 96.6%          │
+  ├──────────┼────────────────┤
+  │ 3 years  │ 89.9%          │
+  ├──────────┼────────────────┤
+  │ 5 years  │ 81.4%          │
+  ├──────────┼────────────────┤
+  │ 10 years │ 65.0%          │
+  └──────────┴────────────────┘
+
+  Median membership survival = 7,154 days (~19.6 years). Half of all member organizations that ever joined are still members after
+  nearly two decades — strong retention by any standard.
+
+  2. Hazard is constant over time (Weibull rho = 0.996 ≈ 1)
+
+  The Weibull model fits decisively better than LogNormal (ΔAIC = 155.4), and its shape parameter is essentially 1 — meaning churn
+  risk is flat and memoryless. There is no "honeymoon period" of high early churn, nor a wear-out effect as tenure increases. A
+  member who has been in the network for 2 years has the same monthly probability of leaving as one who just joined. This is
+  characteristic of large institutional membership networks where exits are driven by structural events (acquisition, bankruptcy,
+  budget cuts), not by dissatisfaction that accumulates over time.
+
+  3. Class of Trade is the dominant churn driver
+
+  ┌────────────────────┬────────────────┬──────────────┬────────────────────┐
+  │   Class of Trade   │ Mean 3yr Churn │ Active Count │  HR vs reference   │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Home Care          │ 23.9%          │ 36           │ 2.82×              │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Ambulatory Care MD │ (higher risk)  │ —            │ 2.60×              │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Retail             │ 10.6%          │ 32           │ 1.16× (ns)         │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Acute Care         │ 10.6%          │ 149          │ ref                │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Ambulatory Care    │ 9.7%           │ 2,881        │ 1.04× (ns)         │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Long Term Care     │ 8.8%           │ 36           │ 0.87× (ns)         │
+  ├────────────────────┼────────────────┼──────────────┼────────────────────┤
+  │ Other              │ 4.9%           │ 568          │ 0.49× (protective) │
+  └────────────────────┴────────────────┴──────────────┴────────────────────┘
+
+  Home Care and Ambulatory Care MD organizations churn at roughly 2.8× and 2.6× the rate of the average member — highly statistically
+   significant (p < 0.0001 and p < 0.001 respectively). These segments likely face more volatile business conditions: home care
+  agencies are sensitive to reimbursement policy changes; physician-owned MD practices face consolidation pressure.
+
+  4. Non-Profit status is protective; Unknown org status is a risk signal
+
+  - Non-Profit organizations (921 active) churn at 15.2% lower hazard than For-Profit (HR=0.848, p=0.009). Institutional stability
+  and mission-driven membership likely explains this.
+  - Members with Unknown org status (455 active) churn at 19.9% higher hazard (HR=1.199, p=0.004) — this is partly a data quality
+  signal: incomplete member profiles correlate with weaker engagement and higher exit risk.
+
+  5. Cohort effect: newer joiners are stickier
+
+  Each calendar year a member joins later, their churn hazard is 2.5% lower (HR=0.975 per year, p < 0.0001). Members who joined in
+  2020 have about 25% lower hazard than those who joined in 2010. This may reflect: (a) improved onboarding/engagement programs in
+  recent years; (b) newer members joining for more strategic reasons; or (c) survivorship selection — early leavers among recent
+  cohorts haven't had time to churn yet, so the true cohort effect may be partially illusory. Worth monitoring.
+
+  6. Region has no significant effect on churn
+
+  None of the four US Census regions reached p < 0.05. Churn is driven by care type and org status, not geography.
+
+  ---
+  Batch Predictions for 3,702 Active Members
+
+  ┌───────────────────────────┬───────┬─────────────┐
+  │         Risk Tier         │ Count │ % of Active │
+  ├───────────────────────────┼───────┼─────────────┤
+  │ High (3yr churn >35%)     │ 1     │ 0.03%       │
+  ├───────────────────────────┼───────┼─────────────┤
+  │ Medium (3yr churn 20–35%) │ 38    │ 1.0%        │
+  ├───────────────────────────┼───────┼─────────────┤
+  │ Low (<20%)                │ 3,663 │ 99.0%       │
+  └───────────────────────────┴───────┴─────────────┘
+
+  The vast majority of active members have low 3-year churn risk — consistent with the high overall retention rate. The 39
+  Medium/High risk members are almost entirely in the Home Care segment.
+
+  Population-level forecast:
+  - ~115 of the 3,702 active members can be expected to churn in the next 3 years (mean 3yr probability = 9.1%)
+  - At 5 years: ~618 (mean 5yr probability = 16.7%)

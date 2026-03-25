@@ -1,0 +1,33 @@
+# Core data stack
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+
+# File format support
+openpyxl>=3.1        # .xlsx
+odfpy>=1.4           # .ods
+pyarrow>=12.0        # .parquet
+chardet>=5.0         # encoding detection
+
+# Statistics
+scipy>=1.11
+
+# Visualisation
+matplotlib>=3.7
+seaborn>=0.12
+
+# NLP / fuzzy matching (anomaly_detection)
+thefuzz>=0.20
+python-Levenshtein>=0.21
+
+# Survival analysis (Workflow D)
+lifelines>=0.27
+
+# PostgreSQL persistence (db_store)
+psycopg2-binary>=2.9
+
+# Environment / secrets
+python-dotenv>=1.0
+
+# Anthropic API (domain_detector, what_if, self_improver)
+anthropic>=0.25

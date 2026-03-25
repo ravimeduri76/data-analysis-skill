@@ -1,0 +1,63 @@
+{
+  "_comment": "Auto-maintained by hooks/self_improver.py. Do not edit manually unless you know what you are doing.",
+  "_last_updated": "2026-03-25",
+  "extra_keywords": {
+    "Master Data Management": [
+      "mdm",
+      "master data",
+      "golden record",
+      "survivorship",
+      "dedup",
+      "deduplication",
+      "entity resolution",
+      "mailing name",
+      "cleansed",
+      "cleansed city",
+      "cleansed province",
+      "cleansed postal",
+      "cleansed address",
+      "cleansed country",
+      "grm",
+      "grm process state",
+      "grm state",
+      "baxter mdm",
+      "mdm id",
+      "intentional duplicate",
+      "duplicate validator"
+    ],
+    "Healthcare": [
+      "gpo",
+      "gpo id",
+      "top parent gpo",
+      "member status",
+      "class of trade",
+      "membership start",
+      "membership termination",
+      "organizational status",
+      "relationship to gpo",
+      "hin",
+      "health industry number",
+      "acute care",
+      "ambulatory care",
+      "long term care",
+      "coid",
+      "hrsa",
+      "dsh"
+    ]
+  },
+  "extra_profiles": {
+    "Master Data Management": {
+      "role": "master data management analyst with expertise in entity resolution, address standardisation, duplicate detection, and golden record creation",
+      "analysis_lens": "Focus on source vs cleansed field divergence, survivorship rule outcomes, duplicate candidate pairs, MDM pipeline completeness, and GRM state transitions.",
+      "anomaly_guidance": "Flag null cleansed fields (address standardisation pipeline not yet run -- not a source data error), name mismatches between source Legal Name and MDM Mailing Name, inconsistent GRM state transitions, asymmetric block sizes in source-vs-cleansed comparisons (the two blocks typically have different column counts -- compare semantic field pairs, not whole-block identity), and records flagged as intentional duplicates that have not been merged.",
+      "key_metrics": [
+        "golden record completeness %",
+        "duplicate match rate",
+        "cleansing success rate",
+        "null cleansed field %",
+        "survivorship rule coverage",
+        "GRM state distribution"
+      ]
+    }
+  }
+}
