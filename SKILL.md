@@ -74,27 +74,34 @@ If `dataset_path` is not obvious, ask: *"Which file should I analyse?"*
 Retrieve relevant prior runs before starting analysis.
 
 ```python
-import os, hashlib
+import os
 from dotenv import load_dotenv
 load_dotenv(r"C:\Users\Ravi\Data_Analysis\.env")
 
 conn_string = os.getenv("POSTGRES_URL")
 if conn_string:
     try:
-        from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+        from hooks.db_store import get_connection, init_db
+        from hooks.semantic_store import recall_semantic, render_semantic_memory
         conn = get_connection(conn_string)
         init_db(conn)
-        # Compute SHA-256 for exact-match lookup
-        sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
-        past_runs = recall_similar_runs(
-            conn,
-            dataset_sha256=sha,
-            domain=None,           # domain not yet known — will be detected in Step 1b
-            dataset_name=os.path.basename(r"<dataset_path>"),
-            limit=5,
-        )
-        print(render_memory(past_runs, current_query=query))
+        past_runs = recall_semantic(conn, query=query, limit=5)
+        print(render_semantic_memory(past_runs, current_query=query))
         conn.close()
+    except ImportError:
+        # Fallback: sentence-transformers not installed — use keyword-based recall
+        try:
+            import hashlib
+            from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+            conn = get_connection(conn_string)
+            init_db(conn)
+            sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
+            past_runs = recall_similar_runs(conn, dataset_sha256=sha,
+                                             dataset_name=os.path.basename(r"<dataset_path>"), limit=5)
+            print(render_memory(past_runs, current_query=query))
+            conn.close()
+        except Exception as e:
+            print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
     except Exception as e:
         print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
 else:
@@ -511,27 +518,34 @@ Use this workflow when the user provides 2 or more files that are samples of the
 Retrieve relevant prior runs before starting analysis.
 
 ```python
-import os, hashlib
+import os
 from dotenv import load_dotenv
 load_dotenv(r"C:\Users\Ravi\Data_Analysis\.env")
 
 conn_string = os.getenv("POSTGRES_URL")
 if conn_string:
     try:
-        from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+        from hooks.db_store import get_connection, init_db
+        from hooks.semantic_store import recall_semantic, render_semantic_memory
         conn = get_connection(conn_string)
         init_db(conn)
-        # Compute SHA-256 for first sample file (representative fingerprint)
-        sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
-        past_runs = recall_similar_runs(
-            conn,
-            dataset_sha256=sha,
-            domain=None,           # domain not yet known — will be detected in Step B1
-            dataset_name=os.path.basename(r"<dataset_path>"),
-            limit=5,
-        )
-        print(render_memory(past_runs, current_query=query))
+        past_runs = recall_semantic(conn, query=query, limit=5)
+        print(render_semantic_memory(past_runs, current_query=query))
         conn.close()
+    except ImportError:
+        # Fallback: sentence-transformers not installed — use keyword-based recall
+        try:
+            import hashlib
+            from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+            conn = get_connection(conn_string)
+            init_db(conn)
+            sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
+            past_runs = recall_similar_runs(conn, dataset_sha256=sha,
+                                             dataset_name=os.path.basename(r"<dataset_path>"), limit=5)
+            print(render_memory(past_runs, current_query=query))
+            conn.close()
+        except Exception as e:
+            print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
     except Exception as e:
         print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
 else:
@@ -801,27 +815,34 @@ Use this workflow when the user asks to detect anomalies, flag bad values, find 
 Retrieve relevant prior runs before starting analysis.
 
 ```python
-import os, hashlib
+import os
 from dotenv import load_dotenv
 load_dotenv(r"C:\Users\Ravi\Data_Analysis\.env")
 
 conn_string = os.getenv("POSTGRES_URL")
 if conn_string:
     try:
-        from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+        from hooks.db_store import get_connection, init_db
+        from hooks.semantic_store import recall_semantic, render_semantic_memory
         conn = get_connection(conn_string)
         init_db(conn)
-        # Compute SHA-256 for exact-match lookup
-        sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
-        past_runs = recall_similar_runs(
-            conn,
-            dataset_sha256=sha,
-            domain=None,           # domain not yet known — will be detected later
-            dataset_name=os.path.basename(r"<dataset_path>"),
-            limit=5,
-        )
-        print(render_memory(past_runs, current_query=query))
+        past_runs = recall_semantic(conn, query=query, limit=5)
+        print(render_semantic_memory(past_runs, current_query=query))
         conn.close()
+    except ImportError:
+        # Fallback: sentence-transformers not installed — use keyword-based recall
+        try:
+            import hashlib
+            from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+            conn = get_connection(conn_string)
+            init_db(conn)
+            sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
+            past_runs = recall_similar_runs(conn, dataset_sha256=sha,
+                                             dataset_name=os.path.basename(r"<dataset_path>"), limit=5)
+            print(render_memory(past_runs, current_query=query))
+            conn.close()
+        except Exception as e:
+            print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
     except Exception as e:
         print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
 else:
@@ -1118,27 +1139,34 @@ Use this workflow when the user asks about time-to-event data: customer churn, e
 Retrieve relevant prior runs before starting analysis.
 
 ```python
-import os, hashlib
+import os
 from dotenv import load_dotenv
 load_dotenv(r"C:\Users\Ravi\Data_Analysis\.env")
 
 conn_string = os.getenv("POSTGRES_URL")
 if conn_string:
     try:
-        from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+        from hooks.db_store import get_connection, init_db
+        from hooks.semantic_store import recall_semantic, render_semantic_memory
         conn = get_connection(conn_string)
         init_db(conn)
-        # Compute SHA-256 for exact-match lookup
-        sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
-        past_runs = recall_similar_runs(
-            conn,
-            dataset_sha256=sha,
-            domain=None,           # domain not yet known — will be detected in Step D1b
-            dataset_name=os.path.basename(r"<dataset_path>"),
-            limit=5,
-        )
-        print(render_memory(past_runs, current_query=query))
+        past_runs = recall_semantic(conn, query=query, limit=5)
+        print(render_semantic_memory(past_runs, current_query=query))
         conn.close()
+    except ImportError:
+        # Fallback: sentence-transformers not installed — use keyword-based recall
+        try:
+            import hashlib
+            from hooks.db_store import get_connection, init_db, recall_similar_runs, render_memory
+            conn = get_connection(conn_string)
+            init_db(conn)
+            sha = hashlib.sha256(open(r"<dataset_path>", "rb").read()).hexdigest()
+            past_runs = recall_similar_runs(conn, dataset_sha256=sha,
+                                             dataset_name=os.path.basename(r"<dataset_path>"), limit=5)
+            print(render_memory(past_runs, current_query=query))
+            conn.close()
+        except Exception as e:
+            print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
     except Exception as e:
         print(f"[Memory] Database unavailable: {e} -- continuing without memory.")
 else:

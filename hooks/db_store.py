@@ -314,6 +314,38 @@ def save_run(
                 )
 
     conn.commit()
+
+    # Auto-embed the run for semantic recall (best-effort — never breaks the workflow)
+    try:
+        from hooks.semantic_store import build_run_text, generate_metadata, save_embedding
+        _run_row = {
+            "run_id": trace.run_id,
+            "domain": domain_ctx.get("domain", "Unknown"),
+            "analysis_type": analysis_type,
+            "query": getattr(trace, "query", ""),
+            "findings_summary": findings_summary,
+            "workflows_run": workflows_run,
+            "dataset_name": file_name,
+        }
+        _steps_for_embed = [
+            {
+                "step_name": s.get("step", ""),
+                "description": s.get("description", ""),
+                "params": s.get("params", {}),
+                "result_summary": s.get("result_summary", ""),
+            }
+            for s in steps
+        ]
+        _insights_for_embed = [
+            {"finding": i.get("finding", ""), "method": i.get("method", "")}
+            for i in insights
+        ]
+        _embed_text = build_run_text(_run_row, _steps_for_embed, _insights_for_embed)
+        _metadata = generate_metadata(_run_row, _steps_for_embed, _insights_for_embed, domain_ctx)
+        save_embedding(conn, trace.run_id, _embed_text, _metadata)
+    except Exception:
+        pass  # semantic embedding is optional; failure must never surface to the caller
+
     return trace.run_id
 
 
