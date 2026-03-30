@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "analysis-memory": {
+      "command": "python",
+      "args": ["C:\\Users\\Ravi\\research\\data-analysis\\mcp_server.py"],
+      "env": {
+        "POSTGRES_URL": "postgresql://postgres:memorystorepg@localhost:5432/data_analysis"
+      },
+      "_note": "POSTGRES_URL is a fallback. The server reads it from C:\\Users\\Ravi\\Data_Analysis\\.env first."
+    }
+  }
+}
