@@ -1,0 +1,257 @@
+{
+  "_comment": "Domain-solution reference registry. Each domain maps to a list of named solution types. 'triggers' are column-name / value keywords that signal this solution. Edit freely — loaded at runtime by domain_detector.py.",
+
+  "Healthcare": [
+    {
+      "name": "Mortality Prediction",
+      "description": "Predict which patients are at risk of dying within a care episode or defined time window.",
+      "triggers": ["mortality", "death", "deceased", "mortality_flag", "died", "death_date", "expiry", "end_of_life"],
+      "typical_models": ["XGBoost (aucpr)", "LightGBM", "Logistic Regression", "Random Forest"],
+      "key_outputs": ["mortality_risk_score", "risk_tier", "top_risk_factors", "probability_of_death"]
+    },
+    {
+      "name": "Readmission Prediction",
+      "description": "Identify patients likely to be readmitted to hospital within 30/60/90 days of discharge.",
+      "triggers": ["readmission", "readmit", "rehospitalization", "return_visit", "readmission_flag", "true_readmission"],
+      "typical_models": ["XGBoost (aucpr)", "MLP", "LightGBM", "Logistic Regression"],
+      "key_outputs": ["readmission_risk_score", "risk_tier", "predicted_readmission_date", "top_risk_factors"]
+    },
+    {
+      "name": "Length of Stay Modeling",
+      "description": "Predict or analyse patient length of stay to support capacity planning and care pathway optimisation.",
+      "triggers": ["length_of_stay", "los", "admission_date", "discharge_date", "days_admitted", "bed_days"],
+      "typical_models": ["XGBoost Regressor", "LightGBM Regressor", "Linear Regression", "Survival Analysis"],
+      "key_outputs": ["predicted_los", "los_risk_band", "capacity_forecast"]
+    },
+    {
+      "name": "Clinical Risk Stratification",
+      "description": "Score and tier patients by overall clinical risk across multiple conditions or episodes.",
+      "triggers": ["risk_score", "risk_tier", "acuity", "clinical_flag", "hcc", "comorbidity", "cci", "elixhauser"],
+      "typical_models": ["Logistic Regression", "XGBoost", "Rule-based scoring"],
+      "key_outputs": ["risk_score", "risk_tier", "condition_flags", "care_recommendation"]
+    },
+    {
+      "name": "Claim Denial Management",
+      "description": "Identify claims likely to be denied and surface root causes to reduce denial rate.",
+      "triggers": ["claim", "denial", "denied", "rejection", "remark_code", "adjustment", "payer", "remittance"],
+      "typical_models": ["XGBoost", "Logistic Regression", "Rule engine"],
+      "key_outputs": ["denial_probability", "denial_reason", "appeal_recommendation"]
+    },
+    {
+      "name": "Care Pathway Analysis",
+      "description": "Map and optimise clinical care pathways by analysing episode sequences and outcomes.",
+      "triggers": ["pathway", "sequence", "care_plan", "episode", "procedure", "cpt", "icd", "encounter_sequence"],
+      "typical_models": ["Process Mining", "Sequence Analysis", "Survival Analysis"],
+      "key_outputs": ["pathway_map", "deviation_rate", "optimal_sequence", "outcome_by_pathway"]
+    }
+  ],
+
+  "Healthcare Supply Chain / GPO": [
+    {
+      "name": "Membership Churn Prediction",
+      "description": "Predict which GPO members are at risk of terminating membership within a defined time horizon.",
+      "triggers": ["churn", "termination", "membership_end", "lapse", "attrition", "survival", "tenure", "duration"],
+      "typical_models": ["Cox Proportional Hazards", "Kaplan-Meier", "XGBoost", "LightGBM"],
+      "key_outputs": ["churn_probability_1yr", "churn_probability_3yr", "risk_tier", "retention_score"]
+    },
+    {
+      "name": "Contract Penetration Analysis",
+      "description": "Measure and improve member purchasing compliance and contract utilisation by segment.",
+      "triggers": ["contract", "penetration", "compliance", "purchasing", "spend", "utilisation", "committed_spend"],
+      "typical_models": ["Descriptive Analytics", "Segmentation", "Regression"],
+      "key_outputs": ["penetration_rate", "compliance_score", "spend_gap", "opportunity_by_segment"]
+    },
+    {
+      "name": "Member Segmentation",
+      "description": "Segment GPO members by class of trade, purchasing behaviour, or engagement to personalise outreach.",
+      "triggers": ["class_of_trade", "segment", "facility_type", "org_type", "region", "tier"],
+      "typical_models": ["K-Means", "Hierarchical Clustering", "Decision Tree"],
+      "key_outputs": ["segment_label", "segment_profile", "recommended_action"]
+    },
+    {
+      "name": "Network Growth Analysis",
+      "description": "Analyse member acquisition and retention trends to forecast GPO network size and composition.",
+      "triggers": ["membership_start", "new_member", "acquisition", "growth", "net_adds", "active_member"],
+      "typical_models": ["Time Series", "Survival Analysis", "Cohort Analysis"],
+      "key_outputs": ["net_member_growth", "cohort_retention_curve", "acquisition_forecast"]
+    }
+  ],
+
+  "Pharmaceutical": [
+    {
+      "name": "Clinical Trial Outcome Analysis",
+      "description": "Analyse efficacy, safety, and dropout patterns across trial phases.",
+      "triggers": ["trial", "phase", "arm", "placebo", "efficacy", "adverse_event", "dropout", "protocol"],
+      "typical_models": ["Survival Analysis", "Mixed Effects Models", "Logistic Regression"],
+      "key_outputs": ["efficacy_rate", "adverse_event_rate", "dropout_rate", "hazard_ratio"]
+    },
+    {
+      "name": "Adverse Event Detection",
+      "description": "Flag and characterise adverse drug reactions from trial or real-world data.",
+      "triggers": ["adverse", "ae", "side_effect", "toxicity", "sae", "severity", "causality"],
+      "typical_models": ["Anomaly Detection", "Rule-based", "Classification"],
+      "key_outputs": ["ae_flag", "severity_score", "causality_assessment", "signal_strength"]
+    },
+    {
+      "name": "Compound Screening",
+      "description": "Score or rank drug candidates by predicted efficacy or safety profile.",
+      "triggers": ["smiles", "compound", "ic50", "assay", "molecule", "target", "binding", "potency"],
+      "typical_models": ["Random Forest", "Neural Network", "Gradient Boosting"],
+      "key_outputs": ["efficacy_score", "safety_flag", "compound_rank"]
+    }
+  ],
+
+  "Financial Services / Lending": [
+    {
+      "name": "Credit Risk Scoring",
+      "description": "Score loan applicants or existing borrowers by probability of default or delinquency.",
+      "triggers": ["credit", "fico", "default", "delinquency", "score", "loan", "ltv", "dti", "underwriting"],
+      "typical_models": ["Logistic Regression", "XGBoost", "Scorecard"],
+      "key_outputs": ["probability_of_default", "credit_score", "risk_band", "decision_recommendation"]
+    },
+    {
+      "name": "Fraud Detection",
+      "description": "Identify fraudulent transactions or applications in real time or batch.",
+      "triggers": ["fraud", "suspicious", "anomaly", "transaction", "alert", "dispute", "chargeback"],
+      "typical_models": ["Isolation Forest", "XGBoost", "Autoencoder", "Rule engine"],
+      "key_outputs": ["fraud_score", "fraud_flag", "fraud_reason", "alert_priority"]
+    },
+    {
+      "name": "Portfolio Analytics",
+      "description": "Monitor and report on loan portfolio quality, concentration, and performance trends.",
+      "triggers": ["portfolio", "balance", "origination", "vintage", "concentration", "charge_off", "npl"],
+      "typical_models": ["Descriptive Analytics", "Cohort Analysis", "Time Series"],
+      "key_outputs": ["portfolio_summary", "vintage_curves", "concentration_report", "loss_forecast"]
+    }
+  ],
+
+  "Insurance": [
+    {
+      "name": "Claims Analytics",
+      "description": "Analyse claim frequency, severity, and loss ratio to inform pricing and reserving.",
+      "triggers": ["claim", "loss", "severity", "frequency", "reserve", "paid", "incurred", "adjuster"],
+      "typical_models": ["GLM", "Gradient Boosting", "Survival Analysis"],
+      "key_outputs": ["loss_ratio", "severity_distribution", "reserve_estimate", "claim_forecast"]
+    },
+    {
+      "name": "Fraud Detection",
+      "description": "Score claims for suspected fraud or abuse before payment.",
+      "triggers": ["fraud", "suspicious", "duplicate_claim", "inflated", "staged", "referral_pattern"],
+      "typical_models": ["Isolation Forest", "XGBoost", "Network Analysis"],
+      "key_outputs": ["fraud_score", "fraud_flag", "investigation_priority"]
+    },
+    {
+      "name": "Premium Optimisation",
+      "description": "Model risk factors to price premiums more accurately by segment.",
+      "triggers": ["premium", "exposure", "rate", "pricing", "risk_factor", "underwriting", "peril"],
+      "typical_models": ["GLM", "GBM", "Frequency-Severity Model"],
+      "key_outputs": ["indicated_rate", "rate_change", "segment_risk_profile"]
+    }
+  ],
+
+  "Retail & E-commerce": [
+    {
+      "name": "Customer Churn Prediction",
+      "description": "Identify customers at risk of lapsing or reducing purchasing activity.",
+      "triggers": ["churn", "lapse", "inactive", "last_purchase", "retention", "rfm", "recency"],
+      "typical_models": ["XGBoost", "Logistic Regression", "Survival Analysis"],
+      "key_outputs": ["churn_probability", "risk_tier", "recommended_intervention"]
+    },
+    {
+      "name": "Demand Forecasting",
+      "description": "Forecast product demand by SKU, category, or location to inform inventory planning.",
+      "triggers": ["forecast", "demand", "sales_volume", "units_sold", "seasonality", "stockout"],
+      "typical_models": ["ARIMA", "Prophet", "LightGBM", "LSTM"],
+      "key_outputs": ["demand_forecast", "confidence_interval", "stockout_risk"]
+    },
+    {
+      "name": "Recommendation Engine",
+      "description": "Personalise product recommendations based on purchase history and browsing behaviour.",
+      "triggers": ["recommendation", "affinity", "basket", "co_purchase", "collaborative", "purchase_history"],
+      "typical_models": ["Collaborative Filtering", "Matrix Factorisation", "Neural CF"],
+      "key_outputs": ["recommended_products", "affinity_score", "expected_uplift"]
+    },
+    {
+      "name": "Pricing & Promotions Analysis",
+      "description": "Measure price elasticity and promotion effectiveness to optimise margin.",
+      "triggers": ["discount", "promotion", "price_change", "elasticity", "markdown", "margin"],
+      "typical_models": ["Regression", "A/B Test Analysis", "Causal Inference"],
+      "key_outputs": ["price_elasticity", "promo_lift", "optimal_price", "margin_impact"]
+    }
+  ],
+
+  "HR & People Analytics": [
+    {
+      "name": "Attrition Prediction",
+      "description": "Identify employees at risk of leaving to support retention planning.",
+      "triggers": ["attrition", "turnover", "resign", "left", "termination", "flight_risk", "voluntary"],
+      "typical_models": ["XGBoost", "Logistic Regression", "Survival Analysis"],
+      "key_outputs": ["attrition_probability", "risk_tier", "top_drivers", "retention_recommendation"]
+    },
+    {
+      "name": "Compensation Analysis",
+      "description": "Audit pay equity and model compensation structures across levels and demographics.",
+      "triggers": ["salary", "compensation", "pay", "bonus", "equity", "gender_pay", "band", "grade"],
+      "typical_models": ["Regression", "Descriptive Analytics", "Fairness Metrics"],
+      "key_outputs": ["pay_gap", "compa_ratio", "equity_flag", "market_position"]
+    },
+    {
+      "name": "Workforce Planning",
+      "description": "Model headcount needs, hiring pipeline, and span-of-control targets.",
+      "triggers": ["headcount", "hiring", "vacancy", "span_of_control", "capacity", "pipeline", "fte"],
+      "typical_models": ["Scenario Modeling", "Time Series", "Regression"],
+      "key_outputs": ["headcount_forecast", "hiring_target", "gap_analysis"]
+    }
+  ],
+
+  "Education": [
+    {
+      "name": "At-Risk Student Identification",
+      "description": "Flag students at risk of dropping out or failing based on attendance and performance signals.",
+      "triggers": ["dropout", "at_risk", "attendance", "fail", "gpa", "intervention", "early_warning"],
+      "typical_models": ["Logistic Regression", "Random Forest", "XGBoost"],
+      "key_outputs": ["dropout_risk_score", "risk_tier", "recommended_intervention"]
+    },
+    {
+      "name": "Course Effectiveness Analysis",
+      "description": "Measure the impact of courses, instructors, and interventions on student outcomes.",
+      "triggers": ["course", "completion", "pass_rate", "instructor", "curriculum", "module_score"],
+      "typical_models": ["Regression", "A/B Analysis", "Multilevel Modeling"],
+      "key_outputs": ["pass_rate", "completion_rate", "effect_size", "course_ranking"]
+    }
+  ],
+
+  "Industrial Equipment": [
+    {
+      "name": "Predictive Maintenance",
+      "description": "Predict equipment failure or maintenance needs before they cause downtime.",
+      "triggers": ["failure", "maintenance", "fault", "breakdown", "vibration", "temperature", "anomaly", "sensor"],
+      "typical_models": ["Isolation Forest", "LSTM", "Random Forest", "Survival Analysis"],
+      "key_outputs": ["failure_probability", "remaining_useful_life", "maintenance_schedule", "fault_type"]
+    },
+    {
+      "name": "Asset Performance Management",
+      "description": "Track OEE, MTBF, and MTTR to optimise asset utilisation and reliability.",
+      "triggers": ["oee", "mtbf", "mttr", "uptime", "downtime", "availability", "performance_rate"],
+      "typical_models": ["Descriptive Analytics", "Control Charts", "Regression"],
+      "key_outputs": ["oee_score", "mtbf", "mttr", "availability_trend"]
+    },
+    {
+      "name": "Product Data Quality",
+      "description": "Assess and remediate completeness, consistency, and accuracy of equipment specifications.",
+      "triggers": ["specification", "attribute", "completeness", "catalogue", "product_id", "part_number"],
+      "typical_models": ["Rule-based DQ", "Anomaly Detection", "Clustering"],
+      "key_outputs": ["completeness_score", "anomaly_flags", "remediation_list"]
+    }
+  ],
+
+  "General": [
+    {
+      "name": "Exploratory Data Analysis",
+      "description": "Profile, summarise, and surface patterns in an unfamiliar dataset.",
+      "triggers": [],
+      "typical_models": ["Descriptive Statistics", "Correlation Analysis", "Anomaly Detection"],
+      "key_outputs": ["data_profile", "quality_report", "top_findings"]
+    }
+  ]
+}

@@ -1,13 +1,20 @@
 """
-domain_detector.py — Detect the business domain of a DataFrame.
+domain_detector.py — Detect the business domain of a DataFrame and scope
+                      the most likely solution type within that domain.
 
-Uses Claude for semantic domain detection (when an API key is available),
+Uses Claude for semantic detection (when an API key is available),
 with a keyword-heuristic fallback for offline use.
 
 Public API
 ----------
-detect_domain(df, anthropic_api_key, claude_model)  -> dict
-domain_role_prefix(domain_ctx)                       -> str   (prepend to every LLM step)
+detect_domain(df, anthropic_api_key, claude_model)          -> dict
+scope_solution(df, domain_ctx, user_query)                  -> dict
+domain_role_prefix(domain_ctx)                              -> str
+
+Solution registry
+-----------------
+Domain-solution pairs are defined in hooks/domain_solutions.json.
+Edit that file to add or extend solution types without touching this code.
 """
 
 from __future__ import annotations
@@ -23,6 +30,12 @@ import pandas as pd
 _OVERRIDES_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "domain_overrides.json",
+)
+
+# Path to the domain-solution reference registry
+_SOLUTIONS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "domain_solutions.json",
 )
 
 
@@ -251,40 +264,168 @@ def _heuristic_domain(df: pd.DataFrame) -> str:
     return best
 
 
+# ── Solution registry ─────────────────────────────────────────────────────────
+
+def _load_solutions() -> dict[str, list[dict]]:
+    """Load domain_solutions.json; return empty dict on missing/corrupt file."""
+    if os.path.exists(_SOLUTIONS_PATH):
+        try:
+            with open(_SOLUTIONS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Strip the _comment key before returning
+            return {k: v for k, v in data.items() if not k.startswith("_")}
+        except Exception:
+            pass
+    return {}
+
+
+def _heuristic_solution(df: pd.DataFrame, domain: str, user_query: str = "") -> dict:
+    """Score solution types for a detected domain against column names + user query.
+
+    Returns the best-matching solution dict from domain_solutions.json,
+    or a generic fallback if no triggers match.
+    """
+    registry = _load_solutions()
+    solutions = registry.get(domain, registry.get("General", []))
+    if not solutions:
+        return _generic_solution(domain)
+
+    col_text = " ".join(df.columns.str.lower().tolist())
+    try:
+        sample_vals = " ".join(
+            df.head(3).astype(str).values.flatten().tolist()
+        ).lower()
+    except Exception:
+        sample_vals = ""
+    combined = col_text + " " + sample_vals + " " + user_query.lower()
+
+    best_solution: dict = {}
+    best_score: int = -1
+
+    for sol in solutions:
+        score = sum(1 for t in sol.get("triggers", []) if t.replace("_", " ") in combined or t in combined)
+        if score > best_score:
+            best_score = score
+            best_solution = sol
+
+    # If nothing matched even the first solution, default to the first entry
+    if best_score == 0 and solutions:
+        best_solution = solutions[0]
+
+    return best_solution if best_solution else _generic_solution(domain)
+
+
+def _generic_solution(domain: str) -> dict:
+    return {
+        "name": "Exploratory Data Analysis",
+        "description": f"Profile and surface patterns in this {domain} dataset.",
+        "triggers": [],
+        "typical_models": ["Descriptive Statistics", "Correlation Analysis", "Anomaly Detection"],
+        "key_outputs": ["data_profile", "quality_report", "top_findings"],
+    }
+
+
+def _resolve_solution_by_name(domain: str, name_raw: str) -> Optional[dict]:
+    """Find a solution entry by fuzzy name match within a domain (and across all domains).
+
+    Returns None if no match found.
+    """
+    if not name_raw:
+        return None
+    registry = _load_solutions()
+    name_lower = name_raw.lower()
+
+    # Try domain-local match first, then global
+    candidates = registry.get(domain, []) + [
+        s for d, sols in registry.items() if d != domain for s in sols
+    ]
+    for sol in candidates:
+        if not isinstance(sol, dict):
+            continue
+        sol_name = sol.get("name", "").lower()
+        if sol_name == name_lower or sol_name in name_lower or name_lower in sol_name:
+            return sol
+    return None
+
+
 # ── public API ────────────────────────────────────────────────────────────────
+
+def scope_solution(
+    df: pd.DataFrame,
+    domain_ctx: dict,
+    user_query: str = "",
+) -> dict:
+    """Determine the most likely solution type for a detected domain.
+
+    Uses trigger-keyword scoring against column names, sample values, and the
+    optional user query. Falls back to 'Exploratory Data Analysis' when no
+    triggers match.
+
+    Returns a dict with keys:
+      solution_name        : str — named solution type (e.g. 'Mortality Prediction')
+      solution_description : str — what this solution does
+      typical_models       : list[str] — models commonly used
+      key_outputs          : list[str] — expected deliverables
+    """
+    sol = _heuristic_solution(df, domain_ctx.get("domain", "General"), user_query)
+    return {
+        "solution_name":        sol.get("name", "Exploratory Data Analysis"),
+        "solution_description": sol.get("description", ""),
+        "typical_models":       sol.get("typical_models", []),
+        "key_outputs":          sol.get("key_outputs", []),
+    }
+
 
 def detect_domain(
     df: pd.DataFrame,
     anthropic_api_key: Optional[str] = None,
     claude_model: str = "claude-sonnet-4-6",
+    user_query: str = "",
 ) -> dict:
-    """Detect the business domain of a DataFrame.
+    """Detect the business domain of a DataFrame and scope the solution type.
 
     Returns a dict with keys:
-      domain        : str — detected domain name
-      confidence    : str — 'high' | 'medium' | 'low'
-      role          : str — analyst persona for LLM steps
-      summary       : str — one-paragraph description of what this data appears to contain
-      analysis_lens : str — domain-specific analytical focus
-      anomaly_guidance : str — domain-specific anomaly patterns to watch for
-      key_metrics   : list[str] — relevant KPIs / metrics for this domain
-      method        : str — 'claude' | 'heuristic'
+      domain               : str — detected domain name
+      confidence           : str — 'high' | 'medium' | 'low'
+      role                 : str — analyst persona for LLM steps
+      summary              : str — one-paragraph description of what this data contains
+      analysis_lens        : str — domain-specific analytical focus
+      anomaly_guidance     : str — domain-specific anomaly patterns to watch for
+      key_metrics          : list[str] — relevant KPIs / metrics for this domain
+      method               : str — 'claude' | 'heuristic'
+      solution_name        : str — most likely solution type (from domain_solutions.json)
+      solution_description : str — what this solution does
+      typical_models       : list[str] — models commonly used for this solution
+      key_outputs          : list[str] — expected deliverables
     """
     signature = _col_signature(df)
 
     if anthropic_api_key:
         domain_names = [d for d, _ in _get_domain_keywords()] + ["General"]
+        registry = _load_solutions()
+
+        # Build solution options for the detected-domain hint (all domains shown to Claude)
+        all_solution_names: list[str] = []
+        for sols in registry.values():
+            all_solution_names.extend(s["name"] for s in sols if isinstance(s, dict))
+
         prompt = (
-            f"You are a data domain classification expert.\n\n"
-            f"Examine the following dataset signature and determine its business domain.\n\n"
+            f"You are a data domain and solution classification expert.\n\n"
+            f"Examine the following dataset signature and determine:\n"
+            f"1. The business domain\n"
+            f"2. The most likely solution type being built with this data\n\n"
             f"{signature}\n\n"
-            f"Choose the single best-fitting domain from this list:\n"
+            f"{'User query: ' + user_query if user_query else ''}\n\n"
+            f"Choose the single best-fitting domain from:\n"
             f"{', '.join(domain_names)}\n\n"
+            f"Choose the single best-fitting solution type from:\n"
+            f"{', '.join(all_solution_names)}\n\n"
             f"Then write a one-paragraph plain-English summary of what this dataset appears to contain "
             f"and what business questions it could answer.\n\n"
             f"Reply with exactly this format (nothing else):\n"
             f"DOMAIN: <domain name from list above>\n"
             f"CONFIDENCE: high or medium or low\n"
+            f"SOLUTION: <solution type from list above>\n"
             f"SUMMARY: <one paragraph, max 80 words>"
         )
         try:
@@ -292,20 +433,20 @@ def detect_domain(
             client = _anthropic.Anthropic(api_key=anthropic_api_key)
             resp = client.messages.create(
                 model=claude_model,
-                max_tokens=200,
+                max_tokens=250,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = resp.content[0].text.strip()
 
             domain = "General"
             confidence = "medium"
+            solution_name_raw = ""
             summary = ""
 
             for line in text.splitlines():
                 line = line.strip()
                 if line.upper().startswith("DOMAIN:"):
                     raw_domain = line.split(":", 1)[1].strip()
-                    # match to known domain
                     for d in _DOMAIN_PROFILES:
                         if d.lower() in raw_domain.lower() or raw_domain.lower() in d.lower():
                             domain = d
@@ -314,37 +455,52 @@ def detect_domain(
                         domain = raw_domain if raw_domain else "General"
                 elif line.upper().startswith("CONFIDENCE:"):
                     confidence = line.split(":", 1)[1].strip().lower()
+                elif line.upper().startswith("SOLUTION:"):
+                    solution_name_raw = line.split(":", 1)[1].strip()
                 elif line.upper().startswith("SUMMARY:"):
                     summary = line.split(":", 1)[1].strip()
 
             profile = _get_domain_profiles().get(domain, _DOMAIN_PROFILES["General"])
+
+            # Resolve solution: try to match Claude's answer to a known registry entry
+            sol = _resolve_solution_by_name(domain, solution_name_raw) or \
+                  _heuristic_solution(df, domain, user_query)
+
             return {
-                "domain":            domain,
-                "confidence":        confidence,
-                "role":              profile["role"],
-                "summary":           summary or f"A {domain} dataset.",
-                "analysis_lens":     profile["analysis_lens"],
-                "anomaly_guidance":  profile["anomaly_guidance"],
-                "key_metrics":       profile["key_metrics"],
-                "method":            "claude",
+                "domain":               domain,
+                "confidence":           confidence,
+                "role":                 profile["role"],
+                "summary":              summary or f"A {domain} dataset.",
+                "analysis_lens":        profile["analysis_lens"],
+                "anomaly_guidance":     profile["anomaly_guidance"],
+                "key_metrics":          profile["key_metrics"],
+                "method":               "claude",
+                "solution_name":        sol.get("name", "Exploratory Data Analysis"),
+                "solution_description": sol.get("description", ""),
+                "typical_models":       sol.get("typical_models", []),
+                "key_outputs":          sol.get("key_outputs", []),
             }
 
-        except Exception as e:
-            # Fall through to heuristic
-            pass
+        except Exception:
+            pass  # Fall through to heuristic
 
     # Heuristic fallback
     domain = _heuristic_domain(df)
     profile = _get_domain_profiles().get(domain, _DOMAIN_PROFILES["General"])
+    sol = _heuristic_solution(df, domain, user_query)
     return {
-        "domain":            domain,
-        "confidence":        "medium",
-        "role":              profile["role"],
-        "summary":           f"Heuristic detection identified this as a {domain} dataset based on column names and sample values.",
-        "analysis_lens":     profile["analysis_lens"],
-        "anomaly_guidance":  profile["anomaly_guidance"],
-        "key_metrics":       profile["key_metrics"],
-        "method":            "heuristic",
+        "domain":               domain,
+        "confidence":           "medium",
+        "role":                 profile["role"],
+        "summary":              f"Heuristic detection identified this as a {domain} dataset based on column names and sample values.",
+        "analysis_lens":        profile["analysis_lens"],
+        "anomaly_guidance":     profile["anomaly_guidance"],
+        "key_metrics":          profile["key_metrics"],
+        "method":               "heuristic",
+        "solution_name":        sol.get("name", "Exploratory Data Analysis"),
+        "solution_description": sol.get("description", ""),
+        "typical_models":       sol.get("typical_models", []),
+        "key_outputs":          sol.get("key_outputs", []),
     }
 
 
@@ -352,8 +508,13 @@ def domain_role_prefix(domain_ctx: dict) -> str:
     """Return a formatted role-and-context block to prepend to every LLM reasoning step.
 
     Paste this at the start of your analysis narrative to ground all
-    interpretations in the detected domain.
+    interpretations in the detected domain and solution scope.
     """
+    solution_name = domain_ctx.get("solution_name", "")
+    solution_desc = domain_ctx.get("solution_description", "")
+    typical_models = domain_ctx.get("typical_models", [])
+    key_outputs = domain_ctx.get("key_outputs", [])
+
     lines = [
         f"=== DOMAIN CONTEXT ===",
         f"Domain   : {domain_ctx['domain']}  (detected via {domain_ctx['method']}, confidence: {domain_ctx.get('confidence','?')})",
@@ -361,7 +522,18 @@ def domain_role_prefix(domain_ctx: dict) -> str:
         f"Dataset  : {domain_ctx['summary']}",
         f"Lens     : {domain_ctx['analysis_lens']}",
         f"Anomalies: {domain_ctx['anomaly_guidance']}",
-        f"Key metrics for this domain: {', '.join(domain_ctx.get('key_metrics', []))}",
-        f"======================",
+        f"Key metrics: {', '.join(domain_ctx.get('key_metrics', []))}",
     ]
+    if solution_name:
+        lines += [
+            f"",
+            f"=== SOLUTION SCOPE ===",
+            f"Solution : {solution_name}",
+            f"Purpose  : {solution_desc}",
+        ]
+        if typical_models:
+            lines.append(f"Models   : {', '.join(typical_models)}")
+        if key_outputs:
+            lines.append(f"Outputs  : {', '.join(key_outputs)}")
+    lines.append(f"======================")
     return "\n".join(lines)
