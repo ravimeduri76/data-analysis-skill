@@ -1,19 +1,22 @@
 """
 domain_detector.py — Detect the business domain of a DataFrame and scope
-                      the most likely solution type within that domain.
+                      the most likely solution type and lifecycle stage.
 
 Uses Claude for semantic detection (when an API key is available),
 with a keyword-heuristic fallback for offline use.
 
 Public API
 ----------
-detect_domain(df, anthropic_api_key, claude_model)          -> dict
-scope_solution(df, domain_ctx, user_query)                  -> dict
-domain_role_prefix(domain_ctx)                              -> str
+detect_domain(df, anthropic_api_key, claude_model, user_query)  -> dict
+scope_solution(df, domain_ctx, user_query)                      -> dict
+domain_role_prefix(domain_ctx)                                  -> str
 
 Solution registry
 -----------------
 Domain-solution pairs are defined in hooks/domain_solutions.json.
+Each solution entry carries a lifecycle_stage field:
+  sourcing | extraction | enrichment | preparation | publishing |
+  syndication | analytics | ml_modeling | survival_analysis
 Edit that file to add or extend solution types without touching this code.
 """
 
@@ -113,6 +116,13 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
         "student", "grade", "course", "enrollment", "attendance", "exam",
         "teacher", "school", "district", "gpa", "module", "assignment", "cohort",
     ]),
+    ("Master Data Management", [
+        "master data", "mdm", "pim", "golden record", "golden_record",
+        "entity resolution", "record linkage", "match merge", "survivorship",
+        "data steward", "data governance", "source of record", "system of record",
+        "deduplication", "party data", "product master", "customer master",
+        "supplier master", "material master", "hierarchy management",
+    ]),
 ]
 
 # Domain-specific role descriptions and analytical lenses
@@ -195,6 +205,12 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "anomaly_guidance": "Flag pillar scores outside validated scale ranges (e.g. PHQ-9 > 27), missing mandatory assessments, extreme diet or activity outliers, inconsistent substance use logs, and duplicate user records.",
         "key_metrics": ["overall wellness score", "pillar completion rate", "at-risk population %", "PHQ-9 score", "GAD-7 score", "diet quality index", "active days/week", "clean days"],
     },
+    "Master Data Management": {
+        "role": "master data management specialist with expertise in entity resolution, data governance, golden record design, and multi-source data integration",
+        "analysis_lens": "Focus on source system coverage, match/merge quality, survivorship rule effectiveness, golden record completeness, and downstream syndication health. Identify orphan records, duplicate clusters, unmatched entities, and attribute authority conflicts.",
+        "anomaly_guidance": "Flag duplicate golden records (same entity, multiple IDs), unmatched source records, attribute conflicts with no survivorship rule, broken parent-child hierarchies, and downstream sync failures.",
+        "key_metrics": ["match rate", "duplicate rate", "golden record completeness %", "survivorship conflict rate", "downstream sync latency", "stewardship exception backlog"],
+    },
     "General": {
         "role": "data analyst with broad expertise in tabular data quality, statistical analysis, and business intelligence",
         "analysis_lens": "Focus on data completeness, statistical distributions, anomalous values, and actionable patterns relevant to the dataset's apparent purpose.",
@@ -243,6 +259,83 @@ def _get_domain_profiles() -> dict[str, dict]:
     overrides = _load_overrides()
     extra_profiles = overrides.get("extra_profiles", {})
     return {**_DOMAIN_PROFILES, **extra_profiles}
+
+
+# ── Lifecycle stage detection ─────────────────────────────────────────────────
+
+_LIFECYCLE_STAGE_KEYWORDS: dict[str, list[str]] = {
+    "sourcing": [
+        "data source", "source system", "system of record", "data acquisition",
+        "onboarding", "supplier data", "raw data", "ingest source", "source inventory",
+        "content onboarding", "feed", "api source", "sensor data",
+    ],
+    "extraction": [
+        "extract", "etl", "elt", "cdc", "pipeline", "ingest", "batch load",
+        "landing zone", "staging", "file parse", "api pull", "connector",
+        "data pull", "data dump",
+    ],
+    "enrichment": [
+        "enrich", "augment", "attribute mapping", "taxonomy", "classification",
+        "entity resolution", "record linkage", "fuzzy match", "standardise",
+        "normalise attribute", "reference data", "lookup", "geocode", "annotate",
+    ],
+    "preparation": [
+        "cleanse", "clean", "deduplicate", "dedup", "transform", "normalise",
+        "validate", "golden record", "master record", "survivorship", "merge",
+        "quality rule", "data prep", "make analysis ready",
+    ],
+    "publishing": [
+        "publish", "data product", "data mart", "data hub", "catalogue entry",
+        "api endpoint", "expose data", "serve data", "data contract",
+        "semantic layer", "lakehouse", "warehouse", "ods",
+    ],
+    "syndication": [
+        "syndicate", "distribute", "downstream", "push to", "channel feed",
+        "partner feed", "crm sync", "erp sync", "data subscription",
+        "event stream", "webhook", "broadcast",
+    ],
+    "analytics": [
+        "analyse", "analyze", "report", "dashboard", "insight", "profile",
+        "segment", "summarise", "kpi", "trend", "compare", "explore",
+        "data quality", "anomaly", "outlier",
+    ],
+    "ml_modeling": [
+        "predict", "model", "train", "classification", "regression", "cluster",
+        "feature engineer", "machine learning", "deep learning", "xgboost",
+        "random forest", "churn model", "risk model", "propensity",
+    ],
+    "survival_analysis": [
+        "survival", "time to event", "churn", "kaplan meier", "hazard",
+        "cox", "retention", "time to failure", "event study", "tenure",
+    ],
+}
+
+
+def _detect_lifecycle_stage(user_query: str, sol: dict | None = None) -> str:
+    """Infer the lifecycle stage from user query text and/or a matched solution entry.
+
+    Priority order:
+      1. If the solution entry already has a lifecycle_stage, return it.
+      2. Score the user query against _LIFECYCLE_STAGE_KEYWORDS.
+      3. Default to 'analytics'.
+    """
+    # 1. Trust the solution registry first
+    if sol and sol.get("lifecycle_stage"):
+        return sol["lifecycle_stage"]
+
+    # 2. Score query against keywords
+    if user_query:
+        q = user_query.lower()
+        scores: dict[str, int] = {
+            stage: sum(1 for kw in kws if kw in q)
+            for stage, kws in _LIFECYCLE_STAGE_KEYWORDS.items()
+        }
+        best = max(scores, key=lambda s: scores[s])
+        if scores[best] > 0:
+            return best
+
+    # 3. Default
+    return "analytics"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -350,9 +443,10 @@ def _heuristic_solution(df: pd.DataFrame, domain: str, user_query: str = "") -> 
 def _generic_solution(domain: str) -> dict:
     return {
         "name": "Exploratory Data Analysis",
+        "lifecycle_stage": "analytics",
         "description": f"Profile and surface patterns in this {domain} dataset.",
         "triggers": [],
-        "typical_models": ["Descriptive Statistics", "Correlation Analysis", "Anomaly Detection"],
+        "typical_tools": ["Descriptive Statistics", "Correlation Analysis", "Anomaly Detection"],
         "key_outputs": ["data_profile", "quality_report", "top_findings"],
     }
 
@@ -387,7 +481,7 @@ def scope_solution(
     domain_ctx: dict,
     user_query: str = "",
 ) -> dict:
-    """Determine the most likely solution type for a detected domain.
+    """Determine the most likely solution type and lifecycle stage for a detected domain.
 
     Uses trigger-keyword scoring against column names, sample values, and the
     optional user query. Falls back to 'Exploratory Data Analysis' when no
@@ -396,14 +490,17 @@ def scope_solution(
     Returns a dict with keys:
       solution_name        : str — named solution type (e.g. 'Mortality Prediction')
       solution_description : str — what this solution does
-      typical_models       : list[str] — models commonly used
+      lifecycle_stage      : str — sourcing|extraction|enrichment|preparation|publishing|syndication|analytics|ml_modeling|survival_analysis
+      typical_tools        : list[str] — tools / models commonly used
       key_outputs          : list[str] — expected deliverables
     """
     sol = _heuristic_solution(df, domain_ctx.get("domain", "General"), user_query)
+    tools = sol.get("typical_tools") or sol.get("typical_models") or []
     return {
         "solution_name":        sol.get("name", "Exploratory Data Analysis"),
         "solution_description": sol.get("description", ""),
-        "typical_models":       sol.get("typical_models", []),
+        "lifecycle_stage":      _detect_lifecycle_stage(user_query, sol),
+        "typical_tools":        tools,
         "key_outputs":          sol.get("key_outputs", []),
     }
 
@@ -427,7 +524,8 @@ def detect_domain(
       method               : str — 'claude' | 'heuristic'
       solution_name        : str — most likely solution type (from domain_solutions.json)
       solution_description : str — what this solution does
-      typical_models       : list[str] — models commonly used for this solution
+      lifecycle_stage      : str — where in the data lifecycle this solution sits
+      typical_tools        : list[str] — tools / models commonly used for this solution
       key_outputs          : list[str] — expected deliverables
     """
     signature = _col_signature(df)
@@ -441,23 +539,29 @@ def detect_domain(
         for sols in registry.values():
             all_solution_names.extend(s["name"] for s in sols if isinstance(s, dict))
 
+        lifecycle_stages = list(_LIFECYCLE_STAGE_KEYWORDS.keys())
+
         prompt = (
             f"You are a data domain and solution classification expert.\n\n"
             f"Examine the following dataset signature and determine:\n"
             f"1. The business domain\n"
-            f"2. The most likely solution type being built with this data\n\n"
+            f"2. The most likely solution type being built with this data\n"
+            f"3. The data lifecycle stage this solution operates in\n\n"
             f"{signature}\n\n"
             f"{'User query: ' + user_query if user_query else ''}\n\n"
             f"Choose the single best-fitting domain from:\n"
             f"{', '.join(domain_names)}\n\n"
             f"Choose the single best-fitting solution type from:\n"
             f"{', '.join(all_solution_names)}\n\n"
+            f"Choose the single best-fitting lifecycle stage from:\n"
+            f"{', '.join(lifecycle_stages)}\n\n"
             f"Then write a one-paragraph plain-English summary of what this dataset appears to contain "
             f"and what business questions it could answer.\n\n"
             f"Reply with exactly this format (nothing else):\n"
             f"DOMAIN: <domain name from list above>\n"
             f"CONFIDENCE: high or medium or low\n"
             f"SOLUTION: <solution type from list above>\n"
+            f"LIFECYCLE: <lifecycle stage from list above>\n"
             f"SUMMARY: <one paragraph, max 80 words>"
         )
         try:
@@ -465,7 +569,7 @@ def detect_domain(
             client = _anthropic.Anthropic(api_key=anthropic_api_key)
             resp = client.messages.create(
                 model=claude_model,
-                max_tokens=250,
+                max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = resp.content[0].text.strip()
@@ -473,6 +577,7 @@ def detect_domain(
             domain = "General"
             confidence = "medium"
             solution_name_raw = ""
+            lifecycle_stage_raw = ""
             summary = ""
 
             for line in text.splitlines():
@@ -489,6 +594,8 @@ def detect_domain(
                     confidence = line.split(":", 1)[1].strip().lower()
                 elif line.upper().startswith("SOLUTION:"):
                     solution_name_raw = line.split(":", 1)[1].strip()
+                elif line.upper().startswith("LIFECYCLE:"):
+                    lifecycle_stage_raw = line.split(":", 1)[1].strip().lower()
                 elif line.upper().startswith("SUMMARY:"):
                     summary = line.split(":", 1)[1].strip()
 
@@ -497,6 +604,14 @@ def detect_domain(
             # Resolve solution: try to match Claude's answer to a known registry entry
             sol = _resolve_solution_by_name(domain, solution_name_raw) or \
                   _heuristic_solution(df, domain, user_query)
+
+            # Resolve lifecycle: trust Claude if valid, else derive from solution/query
+            lifecycle_stage = (
+                lifecycle_stage_raw
+                if lifecycle_stage_raw in _LIFECYCLE_STAGE_KEYWORDS
+                else _detect_lifecycle_stage(user_query, sol)
+            )
+            tools = sol.get("typical_tools") or sol.get("typical_models") or []
 
             return {
                 "domain":               domain,
@@ -509,7 +624,8 @@ def detect_domain(
                 "method":               "claude",
                 "solution_name":        sol.get("name", "Exploratory Data Analysis"),
                 "solution_description": sol.get("description", ""),
-                "typical_models":       sol.get("typical_models", []),
+                "lifecycle_stage":      lifecycle_stage,
+                "typical_tools":        tools,
                 "key_outputs":          sol.get("key_outputs", []),
             }
 
@@ -520,6 +636,7 @@ def detect_domain(
     domain = _heuristic_domain(df)
     profile = _get_domain_profiles().get(domain, _DOMAIN_PROFILES["General"])
     sol = _heuristic_solution(df, domain, user_query)
+    tools = sol.get("typical_tools") or sol.get("typical_models") or []
     return {
         "domain":               domain,
         "confidence":           "medium",
@@ -531,7 +648,8 @@ def detect_domain(
         "method":               "heuristic",
         "solution_name":        sol.get("name", "Exploratory Data Analysis"),
         "solution_description": sol.get("description", ""),
-        "typical_models":       sol.get("typical_models", []),
+        "lifecycle_stage":      _detect_lifecycle_stage(user_query, sol),
+        "typical_tools":        tools,
         "key_outputs":          sol.get("key_outputs", []),
     }
 
@@ -542,10 +660,12 @@ def domain_role_prefix(domain_ctx: dict) -> str:
     Paste this at the start of your analysis narrative to ground all
     interpretations in the detected domain and solution scope.
     """
-    solution_name = domain_ctx.get("solution_name", "")
-    solution_desc = domain_ctx.get("solution_description", "")
-    typical_models = domain_ctx.get("typical_models", [])
-    key_outputs = domain_ctx.get("key_outputs", [])
+    solution_name  = domain_ctx.get("solution_name", "")
+    solution_desc  = domain_ctx.get("solution_description", "")
+    lifecycle      = domain_ctx.get("lifecycle_stage", "")
+    # Support both old 'typical_models' and new 'typical_tools' key
+    typical_tools  = domain_ctx.get("typical_tools") or domain_ctx.get("typical_models") or []
+    key_outputs    = domain_ctx.get("key_outputs", [])
 
     lines = [
         f"=== DOMAIN CONTEXT ===",
@@ -561,10 +681,12 @@ def domain_role_prefix(domain_ctx: dict) -> str:
             f"",
             f"=== SOLUTION SCOPE ===",
             f"Solution : {solution_name}",
+            f"Lifecycle: {lifecycle}" if lifecycle else "",
             f"Purpose  : {solution_desc}",
         ]
-        if typical_models:
-            lines.append(f"Models   : {', '.join(typical_models)}")
+        lines = [l for l in lines if l != ""]  # remove blank placeholder lines
+        if typical_tools:
+            lines.append(f"Tools    : {', '.join(typical_tools)}")
         if key_outputs:
             lines.append(f"Outputs  : {', '.join(key_outputs)}")
     lines.append(f"======================")

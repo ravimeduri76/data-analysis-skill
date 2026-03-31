@@ -1,311 +1,896 @@
 {
-  "_comment": "Domain-solution reference registry. Each domain maps to a list of named solution types. 'triggers' are column-name / value keywords that signal this solution. Edit freely — loaded at runtime by domain_detector.py.",
+  "_comment": "Domain-solution reference registry. Each solution has a lifecycle_stage field: sourcing | extraction | enrichment | preparation | publishing | syndication | analytics | ml_modeling | survival_analysis. Triggers are column-name / value / query keywords. Edit freely — loaded at runtime by domain_detector.py.",
+
+  "_lifecycle_stages": {
+    "sourcing":          "Identify and acquire raw data from source systems, suppliers, APIs, or sensors",
+    "extraction":        "Pull structured data from source systems via ETL, APIs, file parsing, or CDC",
+    "enrichment":        "Add value to data via taxonomy mapping, attribute augmentation, entity resolution, or standards alignment",
+    "preparation":       "Cleanse, normalise, deduplicate, validate, and transform data into analysis-ready form",
+    "publishing":        "Expose data as a data product, catalogue entry, golden record, or analytics-ready mart",
+    "syndication":       "Distribute data to downstream consumers, partners, channels, or marketplaces",
+    "analytics":         "Profile, report, segment, and surface insights from prepared data",
+    "ml_modeling":       "Build predictive, classification, regression, or clustering models",
+    "survival_analysis": "Time-to-event modelling: churn, failure, retention, hazard"
+  },
+
+  "Master Data Management": [
+    {
+      "name": "Data Source Inventory",
+      "lifecycle_stage": "sourcing",
+      "description": "Catalogue all source systems contributing to a master data domain, mapping attributes, update frequencies, and authority levels.",
+      "triggers": ["source system", "data source", "contributing system", "system of record", "authority", "source inventory"],
+      "typical_tools": ["Data Catalogue", "Lineage Tool", "Source Profiler"],
+      "key_outputs": ["source_inventory", "authority_matrix", "attribute_to_source_map"]
+    },
+    {
+      "name": "Multi-Source Data Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract and stage records from multiple source systems into a common landing zone for matching and merging.",
+      "triggers": ["extract", "ingest", "stage", "landing zone", "etl", "cdc", "batch load", "pipeline"],
+      "typical_tools": ["ETL (Talend, Informatica, dbt)", "CDC (Debezium)", "File ingestion"],
+      "key_outputs": ["staged_records", "extraction_log", "source_record_count"]
+    },
+    {
+      "name": "Entity Resolution",
+      "lifecycle_stage": "enrichment",
+      "description": "Identify and link records that refer to the same real-world entity across sources using probabilistic or deterministic matching.",
+      "triggers": ["entity resolution", "record linkage", "match", "deduplicate", "fuzzy match", "probabilistic match", "deterministic match", "survivorship"],
+      "typical_tools": ["Splink", "Zingg", "MDM Hub match engine", "Custom blocking + scoring"],
+      "key_outputs": ["match_clusters", "match_score", "golden_id", "survivorship_rule_output"]
+    },
+    {
+      "name": "Golden Record Creation",
+      "lifecycle_stage": "preparation",
+      "description": "Merge matched records into a single authoritative golden record applying survivorship rules to resolve attribute conflicts.",
+      "triggers": ["golden record", "master record", "survivorship", "merge", "best value", "single source of truth", "consolidate"],
+      "typical_tools": ["MDM Hub (Informatica, Reltio, Semarchy)", "Custom survivorship rules"],
+      "key_outputs": ["golden_record", "attribute_source_provenance", "conflict_report", "merge_log"]
+    },
+    {
+      "name": "MDM Hub Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish the master data hub so downstream systems can consume verified golden records via API, event stream, or replication.",
+      "triggers": ["publish", "golden record api", "master hub", "data hub", "api endpoint", "event stream", "replication"],
+      "typical_tools": ["REST API", "Kafka topic", "Data Mesh", "GraphQL"],
+      "key_outputs": ["golden_record_api", "publish_latency", "consumer_registry"]
+    },
+    {
+      "name": "Downstream Syndication",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute master data updates to all registered downstream consumers — ERP, CRM, analytics, partner portals.",
+      "triggers": ["syndicate", "distribute", "downstream", "push to erp", "crm sync", "partner feed", "data subscription"],
+      "typical_tools": ["Event-driven (Kafka, AWS SNS)", "ETL push", "API webhooks"],
+      "key_outputs": ["sync_status", "consumer_update_log", "distribution_latency"]
+    },
+    {
+      "name": "Data Stewardship & Governance",
+      "lifecycle_stage": "analytics",
+      "description": "Monitor data quality, manage exception queues, and enforce business rules across the master data lifecycle.",
+      "triggers": ["steward", "governance", "exception queue", "data quality rule", "workflow", "approval", "data steward"],
+      "typical_tools": ["MDM Hub stewardship UI", "Data Quality tool", "JIRA / ServiceNow"],
+      "key_outputs": ["dq_score", "exception_count", "rule_pass_rate", "steward_workload"]
+    }
+  ],
 
   "Mechanical Components": [
     {
+      "name": "Supplier Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Onboard supplier data sheets, ERP extracts, and manufacturer specification files as the raw input to product data management.",
+      "triggers": ["supplier data", "data sheet", "manufacturer spec", "erp extract", "onboard supplier", "content onboarding"],
+      "typical_tools": ["Supplier portal", "EDI", "File ingestion", "ERP extract"],
+      "key_outputs": ["raw_supplier_records", "source_coverage", "supplier_onboarding_log"]
+    },
+    {
+      "name": "Technical Specification Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Parse structured and semi-structured specification data from PDFs, HTML data sheets, and ERP records into a tabular attribute schema.",
+      "triggers": ["extract spec", "parse pdf", "data sheet parsing", "specification extraction", "attribute extraction", "erp pull"],
+      "typical_tools": ["PDF parser (pdfplumber, Camelot)", "LLM extraction", "OCR", "ERP API"],
+      "key_outputs": ["extracted_attributes", "parse_confidence_score", "unextracted_flag"]
+    },
+    {
+      "name": "Product Attribute Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Classify components into taxonomy hierarchies (UNSPSC, eCl@ss), map to standards (IEC, ISO, DIN), and augment with missing attributes.",
+      "triggers": ["taxonomy", "unspsc", "eclass", "standards mapping", "iec", "din", "attribute enrichment", "classify component"],
+      "typical_tools": ["Taxonomy classifier", "LLM attribute completion", "Standards lookup"],
+      "key_outputs": ["taxonomy_code", "standards_mapping", "enriched_attributes", "enrichment_coverage"]
+    },
+    {
+      "name": "Product Data Cleansing & Normalisation",
+      "lifecycle_stage": "preparation",
+      "description": "Standardise units (mm vs inch, V vs kV), resolve multi-value fields, remove duplicates, and validate against specification rules.",
+      "triggers": ["unit normalisation", "unit conversion", "clean", "normalise", "deduplicate", "data preparation", "validate spec"],
+      "typical_tools": ["Rule-based DQ", "Unit normaliser", "Dedup engine"],
+      "key_outputs": ["normalised_records", "dq_score", "anomaly_report", "duplicate_pairs"]
+    },
+    {
+      "name": "Product Catalogue Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish verified, enriched product records to the PIM system or product catalogue with completeness gate enforcement.",
+      "triggers": ["publish catalogue", "pim", "catalogue update", "product listing", "publish to pim", "completeness gate"],
+      "typical_tools": ["PIM (Akeneo, inRiver, Salsify)", "Catalogue API", "Data product"],
+      "key_outputs": ["published_listings", "completeness_pass_rate", "publish_latency"]
+    },
+    {
+      "name": "Channel & Marketplace Syndication",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute product content to distributor portals, e-procurement platforms, and industrial marketplaces (Grainger, Fastenal, Amazon Business).",
+      "triggers": ["syndicate", "distributor", "marketplace", "channel", "amazon business", "grainger", "e-procurement", "b2b portal"],
+      "typical_tools": ["Syndication hub (Salsify, Syndigo)", "EDI", "API push"],
+      "key_outputs": ["syndication_coverage", "channel_listing_count", "sync_error_rate"]
+    },
+    {
       "name": "Product Data Quality",
+      "lifecycle_stage": "analytics",
       "description": "Assess and remediate specification completeness, grade compliance, and attribute consistency across mechanical component catalogues.",
       "triggers": ["specification", "completeness", "part_number", "catalogue", "attribute", "grade", "compliance"],
-      "typical_models": ["Rule-based DQ", "Anomaly Detection", "Clustering"],
+      "typical_tools": ["Rule-based DQ", "Anomaly Detection", "Clustering"],
       "key_outputs": ["completeness_score", "anomaly_flags", "grade_compliance_rate", "remediation_list"]
     },
     {
       "name": "Fastener Selection & Compatibility",
-      "description": "Match fastener specifications to application requirements and flag incompatible pairings (thread mismatch, grade underspec, material incompatibility).",
+      "lifecycle_stage": "analytics",
+      "description": "Match fastener specifications to application requirements and flag incompatible pairings.",
       "triggers": ["fastener", "bolt", "thread", "torque", "material", "grade", "compatibility", "tensile"],
-      "typical_models": ["Rule engine", "Constraint Reasoning", "Classification"],
+      "typical_tools": ["Rule engine", "Constraint Reasoning", "Classification"],
       "key_outputs": ["compatibility_flag", "recommended_grade", "torque_spec", "substitution_list"]
     },
     {
       "name": "Predictive Maintenance",
+      "lifecycle_stage": "ml_modeling",
       "description": "Predict mechanical component wear or failure based on load cycles, material fatigue, and environmental exposure.",
       "triggers": ["failure", "wear", "fatigue", "cycle", "load", "maintenance", "replacement"],
-      "typical_models": ["Survival Analysis", "Random Forest", "LSTM"],
+      "typical_tools": ["Survival Analysis", "Random Forest", "LSTM"],
       "key_outputs": ["failure_probability", "remaining_useful_life", "maintenance_schedule"]
+    }
+  ],
+
+  "Industrial Equipment": [
+    {
+      "name": "Equipment Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire sensor streams, SCADA data, maintenance logs, and ERP asset records as the raw input to equipment analytics.",
+      "triggers": ["sensor data", "scada", "iot", "asset register", "equipment data", "maintenance log", "erp asset"],
+      "typical_tools": ["MQTT broker", "OPC-UA", "SCADA historian", "ERP extract"],
+      "key_outputs": ["raw_telemetry", "asset_inventory", "data_coverage_report"]
+    },
+    {
+      "name": "Technical Specification Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract equipment specifications and performance parameters from manuals, ERP records, and sensor streams.",
+      "triggers": ["extract", "parse manual", "specification extraction", "erp pull", "sensor reading"],
+      "typical_tools": ["PDF parser", "ERP API", "OPC-UA client", "LLM extraction"],
+      "key_outputs": ["extracted_specs", "sensor_timeseries", "extraction_log"]
+    },
+    {
+      "name": "Asset Attribute Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Classify equipment against taxonomy (ISO 14224, UNSPSC), link to maintenance records, and append manufacturer specifications.",
+      "triggers": ["taxonomy", "iso 14224", "asset classification", "enrich asset", "link maintenance"],
+      "typical_tools": ["Taxonomy classifier", "Asset management API", "Standards lookup"],
+      "key_outputs": ["classified_assets", "enrichment_coverage", "standards_alignment"]
+    },
+    {
+      "name": "Sensor Data Preparation",
+      "lifecycle_stage": "preparation",
+      "description": "Cleanse, resample, and normalise sensor time series — handle missing readings, outlier spikes, and sensor drift.",
+      "triggers": ["resample", "sensor clean", "time series prep", "handle missing", "outlier", "normalise sensor"],
+      "typical_tools": ["pandas resample", "Kalman filter", "Rolling statistics"],
+      "key_outputs": ["clean_timeseries", "imputed_gaps", "outlier_log"]
+    },
+    {
+      "name": "Asset Data Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish a unified asset data product to the enterprise asset management system or operations data platform.",
+      "triggers": ["asset data product", "eam", "asset management system", "publish asset", "digital twin"],
+      "typical_tools": ["EAM (IBM Maximo, SAP PM)", "Data platform API", "Digital twin platform"],
+      "key_outputs": ["asset_data_product", "publish_completeness", "consumer_count"]
+    },
+    {
+      "name": "Predictive Maintenance",
+      "lifecycle_stage": "ml_modeling",
+      "description": "Predict equipment failure or maintenance needs before they cause downtime.",
+      "triggers": ["failure", "maintenance", "fault", "breakdown", "vibration", "temperature", "anomaly", "sensor"],
+      "typical_tools": ["Isolation Forest", "LSTM", "Random Forest", "Survival Analysis"],
+      "key_outputs": ["failure_probability", "remaining_useful_life", "maintenance_schedule", "fault_type"]
+    },
+    {
+      "name": "Asset Performance Management",
+      "lifecycle_stage": "analytics",
+      "description": "Track OEE, MTBF, and MTTR to optimise asset utilisation and reliability.",
+      "triggers": ["oee", "mtbf", "mttr", "uptime", "downtime", "availability", "performance_rate"],
+      "typical_tools": ["Descriptive Analytics", "Control Charts", "Regression"],
+      "key_outputs": ["oee_score", "mtbf", "mttr", "availability_trend"]
     }
   ],
 
   "Wellness": [
     {
+      "name": "Wellness Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire data from wearables, validated assessment instruments (PHQ-9, GAD-7), nutrition logs, and EHR wellness records.",
+      "triggers": ["wearable", "fitbit", "apple health", "phq-9", "gad-7", "survey", "assessment", "ehr wellness"],
+      "typical_tools": ["Wearable API (Fitbit, Garmin)", "REDCap", "EHR integration", "Survey platform"],
+      "key_outputs": ["raw_assessments", "wearable_timeseries", "data_consent_log"]
+    },
+    {
+      "name": "Wellness Data Preparation",
+      "lifecycle_stage": "preparation",
+      "description": "Harmonise assessment scores across instrument versions, impute missing pillar data, and normalise units across devices.",
+      "triggers": ["harmonise", "normalise score", "impute", "instrument version", "pillar data", "clean wellness"],
+      "typical_tools": ["Score mapping tables", "Imputation", "Normalisation"],
+      "key_outputs": ["harmonised_pillar_scores", "imputation_log", "data_quality_report"]
+    },
+    {
       "name": "Wellness Risk Scoring",
-      "description": "Score individuals across the six wellness pillars (physical fitness, psychological wellbeing, diet, social relations, medical conditions, substance absence) to identify those at risk of wellness decline.",
+      "lifecycle_stage": "ml_modeling",
+      "description": "Score individuals across the six wellness pillars to identify those at risk of wellness decline.",
       "triggers": ["wellness", "pillar", "fitness_score", "mental_health", "diet_quality", "social_relations", "substance_use", "medical_conditions"],
-      "typical_models": ["Composite Scoring", "Logistic Regression", "XGBoost"],
+      "typical_tools": ["Composite Scoring", "Logistic Regression", "XGBoost"],
       "key_outputs": ["overall_wellness_score", "pillar_scores", "risk_tier", "recommended_interventions"]
     },
     {
       "name": "Mental Health Screening",
+      "lifecycle_stage": "analytics",
       "description": "Apply validated screening instruments (PHQ-9, GAD-7) to identify individuals at risk of depression or anxiety.",
       "triggers": ["phq", "gad", "depression", "anxiety", "mental_health_score", "mood", "stress"],
-      "typical_models": ["Threshold Scoring (PHQ-9/GAD-7)", "Logistic Regression", "Classification"],
+      "typical_tools": ["Threshold Scoring (PHQ-9/GAD-7)", "Logistic Regression", "Classification"],
       "key_outputs": ["phq9_score", "gad7_score", "risk_level", "referral_flag"]
     },
     {
       "name": "Behaviour Change Analytics",
+      "lifecycle_stage": "analytics",
       "description": "Track habit formation, relapse risk, and engagement trends across wellness programme participants.",
       "triggers": ["habit", "clean_days", "substance_use", "adherence", "engagement", "streak", "relapse"],
-      "typical_models": ["Survival Analysis", "Time Series", "Logistic Regression"],
+      "typical_tools": ["Survival Analysis", "Time Series", "Logistic Regression"],
       "key_outputs": ["adherence_rate", "relapse_risk_score", "streak_length", "engagement_trend"]
     },
     {
       "name": "Population Health Profiling",
-      "description": "Segment a population by wellness pillar performance to prioritise programme resources and interventions.",
+      "lifecycle_stage": "analytics",
+      "description": "Segment a population by wellness pillar performance to prioritise programme resources.",
       "triggers": ["population", "segment", "pillar_completion", "cohort", "programme", "wellbeing_index"],
-      "typical_models": ["K-Means Clustering", "Descriptive Analytics", "Composite Indexing"],
+      "typical_tools": ["K-Means Clustering", "Descriptive Analytics", "Composite Indexing"],
       "key_outputs": ["population_segments", "pillar_gap_analysis", "programme_prioritisation"]
     }
   ],
 
   "Healthcare": [
     {
+      "name": "Clinical Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Identify and acquire clinical data from EHR systems, claims feeds, lab results, ADT streams, and care coordination platforms.",
+      "triggers": ["ehr feed", "claims feed", "adt", "lab feed", "clinical feed", "data acquisition", "source ehr", "fhir source"],
+      "typical_tools": ["HL7 listener", "FHIR R4 API", "Claims file", "EDI 837/835"],
+      "key_outputs": ["source_inventory", "ingestion_volume", "feed_latency_sla"]
+    },
+    {
+      "name": "HL7 / FHIR Data Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract and parse HL7 v2 messages or FHIR resources into structured tabular form for downstream processing.",
+      "triggers": ["hl7", "fhir", "extract clinical", "parse hl7", "fhir extraction", "message processing"],
+      "typical_tools": ["Mirth Connect", "Azure Health Data Services", "HAPI FHIR"],
+      "key_outputs": ["parsed_records", "fhir_resources", "extraction_error_rate"]
+    },
+    {
+      "name": "Clinical Attribute Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Enrich clinical records with ICD-10 coding, HCC risk grouping, patient identity matching across systems, and care episode linking.",
+      "triggers": ["icd coding", "hcc", "risk group", "patient matching", "mpi", "episode linking", "enrich clinical"],
+      "typical_tools": ["MPI (Master Patient Index)", "NLP coder", "HCC grouper", "EMPI"],
+      "key_outputs": ["coded_diagnoses", "hcc_risk_score", "patient_golden_id", "episode_map"]
+    },
+    {
+      "name": "Clinical Data Harmonisation",
+      "lifecycle_stage": "preparation",
+      "description": "Normalise terminology (SNOMED, LOINC, RxNorm), de-identify to HIPAA Safe Harbour or Expert Determination, and reconcile cross-system patient records.",
+      "triggers": ["snomed", "loinc", "rxnorm", "de-identify", "hipaa", "harmonise clinical", "terminology mapping"],
+      "typical_tools": ["UMLS", "Terminology server", "De-identification engine (Microsoft Presidio)"],
+      "key_outputs": ["harmonised_records", "terminology_coverage", "phi_removal_log"]
+    },
+    {
+      "name": "Clinical Data Mart Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish an analytics-ready clinical data mart or longitudinal patient record for reporting and modelling consumption.",
+      "triggers": ["data mart", "analytics ready", "longitudinal", "clinical warehouse", "publish clinical", "omop"],
+      "typical_tools": ["OMOP CDM", "Snowflake", "Azure Synapse", "dbt"],
+      "key_outputs": ["published_mart", "row_count", "data_freshness_lag", "consumer_count"]
+    },
+    {
+      "name": "Health Data Exchange",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute clinical data to payers, HIE networks, care coordination platforms, and public health registries.",
+      "triggers": ["hie", "payer exchange", "care coordination", "public health", "registry", "data sharing", "clinical syndication"],
+      "typical_tools": ["HL7 FHIR bulk export", "Direct messaging", "HIE hub (CommonWell, Carequality)"],
+      "key_outputs": ["exchange_volume", "payer_feeds", "registry_submissions"]
+    },
+    {
       "name": "Mortality Prediction",
+      "lifecycle_stage": "ml_modeling",
       "description": "Predict which patients are at risk of dying within a care episode or defined time window.",
       "triggers": ["mortality", "death", "deceased", "mortality_flag", "died", "death_date", "expiry", "end_of_life"],
-      "typical_models": ["XGBoost (aucpr)", "LightGBM", "Logistic Regression", "Random Forest"],
+      "typical_tools": ["XGBoost (aucpr)", "LightGBM", "Logistic Regression", "Random Forest"],
       "key_outputs": ["mortality_risk_score", "risk_tier", "top_risk_factors", "probability_of_death"]
     },
     {
       "name": "Readmission Prediction",
+      "lifecycle_stage": "ml_modeling",
       "description": "Identify patients likely to be readmitted to hospital within 30/60/90 days of discharge.",
       "triggers": ["readmission", "readmit", "rehospitalization", "return_visit", "readmission_flag", "true_readmission"],
-      "typical_models": ["XGBoost (aucpr)", "MLP", "LightGBM", "Logistic Regression"],
+      "typical_tools": ["XGBoost (aucpr)", "MLP", "LightGBM", "Logistic Regression"],
       "key_outputs": ["readmission_risk_score", "risk_tier", "predicted_readmission_date", "top_risk_factors"]
     },
     {
       "name": "Length of Stay Modeling",
+      "lifecycle_stage": "ml_modeling",
       "description": "Predict or analyse patient length of stay to support capacity planning and care pathway optimisation.",
       "triggers": ["length_of_stay", "los", "admission_date", "discharge_date", "days_admitted", "bed_days"],
-      "typical_models": ["XGBoost Regressor", "LightGBM Regressor", "Linear Regression", "Survival Analysis"],
+      "typical_tools": ["XGBoost Regressor", "LightGBM Regressor", "Linear Regression", "Survival Analysis"],
       "key_outputs": ["predicted_los", "los_risk_band", "capacity_forecast"]
     },
     {
       "name": "Clinical Risk Stratification",
+      "lifecycle_stage": "analytics",
       "description": "Score and tier patients by overall clinical risk across multiple conditions or episodes.",
       "triggers": ["risk_score", "risk_tier", "acuity", "clinical_flag", "hcc", "comorbidity", "cci", "elixhauser"],
-      "typical_models": ["Logistic Regression", "XGBoost", "Rule-based scoring"],
+      "typical_tools": ["Logistic Regression", "XGBoost", "Rule-based scoring"],
       "key_outputs": ["risk_score", "risk_tier", "condition_flags", "care_recommendation"]
     },
     {
       "name": "Claim Denial Management",
+      "lifecycle_stage": "analytics",
       "description": "Identify claims likely to be denied and surface root causes to reduce denial rate.",
       "triggers": ["claim", "denial", "denied", "rejection", "remark_code", "adjustment", "payer", "remittance"],
-      "typical_models": ["XGBoost", "Logistic Regression", "Rule engine"],
+      "typical_tools": ["XGBoost", "Logistic Regression", "Rule engine"],
       "key_outputs": ["denial_probability", "denial_reason", "appeal_recommendation"]
     },
     {
       "name": "Care Pathway Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Map and optimise clinical care pathways by analysing episode sequences and outcomes.",
       "triggers": ["pathway", "sequence", "care_plan", "episode", "procedure", "cpt", "icd", "encounter_sequence"],
-      "typical_models": ["Process Mining", "Sequence Analysis", "Survival Analysis"],
+      "typical_tools": ["Process Mining", "Sequence Analysis", "Survival Analysis"],
       "key_outputs": ["pathway_map", "deviation_rate", "optimal_sequence", "outcome_by_pathway"]
     }
   ],
 
   "Healthcare Supply Chain / GPO": [
     {
+      "name": "Member Roster Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire member roster files and enrollment data from GPO member facilities, regional health systems, and IDNs.",
+      "triggers": ["roster", "enrollment", "member file", "facility data", "member acquisition", "onboard member"],
+      "typical_tools": ["EDI", "Secure file transfer", "Supplier portal", "API"],
+      "key_outputs": ["raw_roster", "source_coverage", "onboarding_log"]
+    },
+    {
+      "name": "Contract & Spend Data Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract contract terms, pricing tiers, and purchasing transaction data from distributor and supplier systems.",
+      "triggers": ["contract extract", "spend extract", "purchasing data", "distributor feed", "transaction pull"],
+      "typical_tools": ["EDI 850/810", "Distributor API", "File ingestion"],
+      "key_outputs": ["contract_records", "spend_transactions", "extraction_completeness"]
+    },
+    {
+      "name": "Facility & Class of Trade Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Classify facilities by Class of Trade (Acute, Ambulatory, Home Care), append geolocation, network affiliation, and ownership data.",
+      "triggers": ["class of trade", "facility type", "geolocation", "network", "ownership", "idn", "enrich facility"],
+      "typical_tools": ["Class of Trade lookup", "AHA / CMS facility database", "Geolocation API"],
+      "key_outputs": ["classified_facilities", "cot_coverage", "affiliation_map"]
+    },
+    {
+      "name": "Member Data Harmonisation",
+      "lifecycle_stage": "preparation",
+      "description": "Deduplicate member records, resolve member ID conflicts across joining events, and normalise membership dates.",
+      "triggers": ["dedup member", "resolve member id", "harmonise membership", "member master", "normalise dates"],
+      "typical_tools": ["Entity resolution", "Rule-based dedup", "Date normalisation"],
+      "key_outputs": ["master_member_list", "dedup_pairs", "date_normalisation_log"]
+    },
+    {
+      "name": "GPO Data Hub Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish a unified member and contract data hub accessible to analytics, contracting, and member services teams.",
+      "triggers": ["publish gpo", "member hub", "contract hub", "analytics ready", "data hub"],
+      "typical_tools": ["Data warehouse", "API layer", "Snowflake / Databricks"],
+      "key_outputs": ["published_member_hub", "freshness_lag", "consumer_count"]
+    },
+    {
+      "name": "Member Portal & Supplier Syndication",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute member and contract data to member-facing portals, supplier systems, and downstream analytics platforms.",
+      "triggers": ["member portal", "supplier syndication", "contract feed", "downstream", "portal update"],
+      "typical_tools": ["Portal API", "EDI", "Webhook", "File export"],
+      "key_outputs": ["portal_sync_rate", "supplier_feed_count", "distribution_latency"]
+    },
+    {
       "name": "Membership Churn Prediction",
+      "lifecycle_stage": "survival_analysis",
       "description": "Predict which GPO members are at risk of terminating membership within a defined time horizon.",
       "triggers": ["churn", "termination", "membership_end", "lapse", "attrition", "survival", "tenure", "duration"],
-      "typical_models": ["Cox Proportional Hazards", "Kaplan-Meier", "XGBoost", "LightGBM"],
+      "typical_tools": ["Cox Proportional Hazards", "Kaplan-Meier", "XGBoost", "LightGBM"],
       "key_outputs": ["churn_probability_1yr", "churn_probability_3yr", "risk_tier", "retention_score"]
     },
     {
       "name": "Contract Penetration Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Measure and improve member purchasing compliance and contract utilisation by segment.",
       "triggers": ["contract", "penetration", "compliance", "purchasing", "spend", "utilisation", "committed_spend"],
-      "typical_models": ["Descriptive Analytics", "Segmentation", "Regression"],
+      "typical_tools": ["Descriptive Analytics", "Segmentation", "Regression"],
       "key_outputs": ["penetration_rate", "compliance_score", "spend_gap", "opportunity_by_segment"]
     },
     {
       "name": "Member Segmentation",
+      "lifecycle_stage": "analytics",
       "description": "Segment GPO members by class of trade, purchasing behaviour, or engagement to personalise outreach.",
       "triggers": ["class_of_trade", "segment", "facility_type", "org_type", "region", "tier"],
-      "typical_models": ["K-Means", "Hierarchical Clustering", "Decision Tree"],
+      "typical_tools": ["K-Means", "Hierarchical Clustering", "Decision Tree"],
       "key_outputs": ["segment_label", "segment_profile", "recommended_action"]
     },
     {
       "name": "Network Growth Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Analyse member acquisition and retention trends to forecast GPO network size and composition.",
       "triggers": ["membership_start", "new_member", "acquisition", "growth", "net_adds", "active_member"],
-      "typical_models": ["Time Series", "Survival Analysis", "Cohort Analysis"],
+      "typical_tools": ["Time Series", "Survival Analysis", "Cohort Analysis"],
       "key_outputs": ["net_member_growth", "cohort_retention_curve", "acquisition_forecast"]
     }
   ],
 
   "Pharmaceutical": [
     {
+      "name": "Clinical & Regulatory Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire trial data, real-world evidence, compound registries, and regulatory submission sources.",
+      "triggers": ["trial data", "rwe", "compound registry", "fda submission", "clinical data source", "real world data"],
+      "typical_tools": ["CDISC EDC", "TrialSpark", "OpenFDA API", "ChEMBL"],
+      "key_outputs": ["data_source_inventory", "trial_data_volume", "rwe_sources"]
+    },
+    {
+      "name": "Trial Data Extraction & Standardisation",
+      "lifecycle_stage": "extraction",
+      "description": "Extract clinical trial data from EDC systems and standardise to CDISC SDTM and ADaM formats.",
+      "triggers": ["sdtm", "adam", "cdisc", "edc extract", "trial extract", "case report form"],
+      "typical_tools": ["SAS", "R (haven)", "Pinnacle 21", "CDISC tooling"],
+      "key_outputs": ["sdtm_datasets", "adam_datasets", "define_xml"]
+    },
+    {
+      "name": "Compound & Indication Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Enrich compound records with MeSH indication codes, ATC classification, and structure-activity annotations.",
+      "triggers": ["mesh", "atc", "indication enrichment", "structure activity", "compound enrichment", "drug class"],
+      "typical_tools": ["PubChem API", "DrugBank", "ChEMBL", "OpenTargets"],
+      "key_outputs": ["enriched_compound_profile", "atc_code", "indication_list"]
+    },
+    {
+      "name": "Trial Data Harmonisation",
+      "lifecycle_stage": "preparation",
+      "description": "Resolve terminology inconsistencies, handle missing endpoint data, and prepare analysis-ready ADaM datasets.",
+      "triggers": ["harmonise trial", "impute missing", "endpoint preparation", "adam derivation", "data cleaning trial"],
+      "typical_tools": ["SAS Proc MI", "R mice", "CDISC validators"],
+      "key_outputs": ["clean_adam", "imputation_report", "protocol_deviation_log"]
+    },
+    {
+      "name": "Regulatory Submission Dataset",
+      "lifecycle_stage": "publishing",
+      "description": "Package and publish analysis-ready datasets for FDA/EMA regulatory submission.",
+      "triggers": ["regulatory submission", "nda", "ema", "fda package", "ectd", "submission dataset"],
+      "typical_tools": ["Pinnacle 21", "SAS", "eCTD builder"],
+      "key_outputs": ["submission_package", "define_xml", "reviewer_guide"]
+    },
+    {
+      "name": "Real-World Evidence Distribution",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute de-identified real-world evidence datasets to health economics partners and registry systems.",
+      "triggers": ["rwe distribution", "registry", "heor", "de-identified data", "partner data sharing"],
+      "typical_tools": ["Secure data enclave", "DataSHIELD", "Federated query"],
+      "key_outputs": ["distributed_rwe", "consent_compliance_log", "partner_access_log"]
+    },
+    {
       "name": "Clinical Trial Outcome Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Analyse efficacy, safety, and dropout patterns across trial phases.",
       "triggers": ["trial", "phase", "arm", "placebo", "efficacy", "adverse_event", "dropout", "protocol"],
-      "typical_models": ["Survival Analysis", "Mixed Effects Models", "Logistic Regression"],
+      "typical_tools": ["Survival Analysis", "Mixed Effects Models", "Logistic Regression"],
       "key_outputs": ["efficacy_rate", "adverse_event_rate", "dropout_rate", "hazard_ratio"]
     },
     {
       "name": "Adverse Event Detection",
+      "lifecycle_stage": "analytics",
       "description": "Flag and characterise adverse drug reactions from trial or real-world data.",
       "triggers": ["adverse", "ae", "side_effect", "toxicity", "sae", "severity", "causality"],
-      "typical_models": ["Anomaly Detection", "Rule-based", "Classification"],
+      "typical_tools": ["Anomaly Detection", "Rule-based", "Classification"],
       "key_outputs": ["ae_flag", "severity_score", "causality_assessment", "signal_strength"]
     },
     {
       "name": "Compound Screening",
+      "lifecycle_stage": "ml_modeling",
       "description": "Score or rank drug candidates by predicted efficacy or safety profile.",
       "triggers": ["smiles", "compound", "ic50", "assay", "molecule", "target", "binding", "potency"],
-      "typical_models": ["Random Forest", "Neural Network", "Gradient Boosting"],
+      "typical_tools": ["Random Forest", "Neural Network", "Gradient Boosting"],
       "key_outputs": ["efficacy_score", "safety_flag", "compound_rank"]
+    }
+  ],
+
+  "Retail & E-commerce": [
+    {
+      "name": "Supplier Content Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Onboard product content from suppliers via data pools (1WorldSync, Salsify), EDI feeds, or direct file uploads.",
+      "triggers": ["supplier content", "data pool", "1worldsync", "content onboarding", "product feed", "supplier file"],
+      "typical_tools": ["1WorldSync", "Salsify Supplier", "EDI", "Supplier portal"],
+      "key_outputs": ["raw_supplier_content", "source_coverage", "onboarding_completeness"]
+    },
+    {
+      "name": "Order & Catalogue Data Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract order history, product catalogue, and customer data from OMS, ERP, and e-commerce platforms.",
+      "triggers": ["extract order", "catalogue extract", "oms pull", "erp extract", "shopify", "magento", "platform export"],
+      "typical_tools": ["Shopify API", "Magento ETL", "SAP extract", "OMS API"],
+      "key_outputs": ["order_history", "product_catalogue", "customer_records"]
+    },
+    {
+      "name": "Product Content Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Enrich product listings with taxonomy classification, SEO keywords, missing attributes, and AI-generated descriptions.",
+      "triggers": ["product enrichment", "taxonomy", "seo", "attribute completion", "ai description", "content enrichment"],
+      "typical_tools": ["LLM content generation", "Taxonomy classifier", "Keyword tool"],
+      "key_outputs": ["enriched_listings", "taxonomy_codes", "seo_scores", "completeness_delta"]
+    },
+    {
+      "name": "Content Normalisation & Deduplication",
+      "lifecycle_stage": "preparation",
+      "description": "Standardise product titles, normalise units, merge duplicate SKUs, and validate required attributes before publishing.",
+      "triggers": ["normalise content", "dedup sku", "merge product", "title standardise", "unit normalise", "validate content"],
+      "typical_tools": ["Dedup engine", "NLP normaliser", "Rule-based DQ"],
+      "key_outputs": ["normalised_catalogue", "duplicate_pairs", "dq_score", "publish_ready_count"]
+    },
+    {
+      "name": "Storefront & PIM Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish enriched product records to the PIM system and push live to the storefront with completeness gates.",
+      "triggers": ["publish storefront", "pim publish", "go live", "product activation", "completeness gate", "storefront update"],
+      "typical_tools": ["PIM (Akeneo, inRiver)", "Storefront API", "CDN"],
+      "key_outputs": ["published_products", "time_to_publish", "gate_pass_rate"]
+    },
+    {
+      "name": "Channel Syndication",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute product content to Google Shopping, Amazon, comparison sites, B2B portals, and international marketplaces.",
+      "triggers": ["syndicate", "google shopping", "amazon", "comparison site", "channel", "marketplace feed", "b2b portal"],
+      "typical_tools": ["Salsify", "Syndigo", "Channable", "Google Merchant Centre API"],
+      "key_outputs": ["channel_coverage", "listing_count_by_channel", "sync_error_rate"]
+    },
+    {
+      "name": "Customer Churn Prediction",
+      "lifecycle_stage": "ml_modeling",
+      "description": "Identify customers at risk of lapsing or reducing purchasing activity.",
+      "triggers": ["churn", "lapse", "inactive", "last_purchase", "retention", "rfm", "recency"],
+      "typical_tools": ["XGBoost", "Logistic Regression", "Survival Analysis"],
+      "key_outputs": ["churn_probability", "risk_tier", "recommended_intervention"]
+    },
+    {
+      "name": "Demand Forecasting",
+      "lifecycle_stage": "ml_modeling",
+      "description": "Forecast product demand by SKU, category, or location to inform inventory planning.",
+      "triggers": ["forecast", "demand", "sales_volume", "units_sold", "seasonality", "stockout"],
+      "typical_tools": ["ARIMA", "Prophet", "LightGBM", "LSTM"],
+      "key_outputs": ["demand_forecast", "confidence_interval", "stockout_risk"]
+    },
+    {
+      "name": "Recommendation Engine",
+      "lifecycle_stage": "ml_modeling",
+      "description": "Personalise product recommendations based on purchase history and browsing behaviour.",
+      "triggers": ["recommendation", "affinity", "basket", "co_purchase", "collaborative", "purchase_history"],
+      "typical_tools": ["Collaborative Filtering", "Matrix Factorisation", "Neural CF"],
+      "key_outputs": ["recommended_products", "affinity_score", "expected_uplift"]
+    },
+    {
+      "name": "Pricing & Promotions Analysis",
+      "lifecycle_stage": "analytics",
+      "description": "Measure price elasticity and promotion effectiveness to optimise margin.",
+      "triggers": ["discount", "promotion", "price_change", "elasticity", "markdown", "margin"],
+      "typical_tools": ["Regression", "A/B Test Analysis", "Causal Inference"],
+      "key_outputs": ["price_elasticity", "promo_lift", "optimal_price", "margin_impact"]
     }
   ],
 
   "Financial Services / Lending": [
     {
+      "name": "Credit Bureau & Applicant Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Pull credit bureau files (Experian, Equifax, TransUnion), bank statement feeds, and open banking data for underwriting.",
+      "triggers": ["credit bureau", "experian", "equifax", "transunion", "open banking", "bank statement", "applicant data"],
+      "typical_tools": ["Bureau API", "Open Banking (Plaid, TrueLayer)", "File ingestion"],
+      "key_outputs": ["bureau_file", "bank_statements", "applicant_records"]
+    },
+    {
+      "name": "Core Banking Data Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract loan records, transaction history, and account data from core banking and loan origination systems.",
+      "triggers": ["core banking", "loan origination", "los extract", "transaction history", "account extract"],
+      "typical_tools": ["Temenos API", "Finastra", "SQL extract", "CDC"],
+      "key_outputs": ["loan_records", "transaction_history", "account_snapshot"]
+    },
+    {
+      "name": "Customer Profile Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Enrich borrower profiles with derived features (DTI, LTV, payment history trends) and third-party data (property values, employment).",
+      "triggers": ["customer enrichment", "derived features", "dti calculation", "ltv", "property data", "employment verification"],
+      "typical_tools": ["Feature engineering", "Property API (Zillow)", "Employment verification API"],
+      "key_outputs": ["enriched_borrower_profile", "dti", "ltv", "derived_features"]
+    },
+    {
+      "name": "Loan Data Harmonisation",
+      "lifecycle_stage": "preparation",
+      "description": "Standardise loan product codes, resolve borrower identity across origination and servicing systems, and clean performance fields.",
+      "triggers": ["harmonise loan", "borrower identity", "loan master", "servicing reconcile", "dedup borrower"],
+      "typical_tools": ["Entity resolution", "Rule-based DQ", "Date normalisation"],
+      "key_outputs": ["harmonised_loan_book", "borrower_master", "dq_report"]
+    },
+    {
+      "name": "Risk Data Mart Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish analytics-ready credit risk and portfolio data mart for underwriting, pricing, and regulatory reporting.",
+      "triggers": ["risk mart", "credit mart", "publish loan data", "analytics ready", "regulatory data"],
+      "typical_tools": ["Snowflake", "dbt", "Data warehouse"],
+      "key_outputs": ["risk_data_mart", "freshness_lag", "consumer_count"]
+    },
+    {
+      "name": "Regulatory Reporting Submission",
+      "lifecycle_stage": "syndication",
+      "description": "Package and submit required regulatory reports (HMDA, Call Report, Basel) to regulatory bodies on schedule.",
+      "triggers": ["hmda", "call report", "basel", "regulatory reporting", "submission", "regulator feed"],
+      "typical_tools": ["Regulatory reporting platform", "FRB submission portal", "XBRL"],
+      "key_outputs": ["submitted_report", "submission_confirmation", "validation_errors"]
+    },
+    {
       "name": "Credit Risk Scoring",
+      "lifecycle_stage": "ml_modeling",
       "description": "Score loan applicants or existing borrowers by probability of default or delinquency.",
       "triggers": ["credit", "fico", "default", "delinquency", "score", "loan", "ltv", "dti", "underwriting"],
-      "typical_models": ["Logistic Regression", "XGBoost", "Scorecard"],
+      "typical_tools": ["Logistic Regression", "XGBoost", "Scorecard"],
       "key_outputs": ["probability_of_default", "credit_score", "risk_band", "decision_recommendation"]
     },
     {
       "name": "Fraud Detection",
+      "lifecycle_stage": "ml_modeling",
       "description": "Identify fraudulent transactions or applications in real time or batch.",
       "triggers": ["fraud", "suspicious", "anomaly", "transaction", "alert", "dispute", "chargeback"],
-      "typical_models": ["Isolation Forest", "XGBoost", "Autoencoder", "Rule engine"],
+      "typical_tools": ["Isolation Forest", "XGBoost", "Autoencoder", "Rule engine"],
       "key_outputs": ["fraud_score", "fraud_flag", "fraud_reason", "alert_priority"]
     },
     {
       "name": "Portfolio Analytics",
+      "lifecycle_stage": "analytics",
       "description": "Monitor and report on loan portfolio quality, concentration, and performance trends.",
       "triggers": ["portfolio", "balance", "origination", "vintage", "concentration", "charge_off", "npl"],
-      "typical_models": ["Descriptive Analytics", "Cohort Analysis", "Time Series"],
+      "typical_tools": ["Descriptive Analytics", "Cohort Analysis", "Time Series"],
       "key_outputs": ["portfolio_summary", "vintage_curves", "concentration_report", "loss_forecast"]
     }
   ],
 
   "Insurance": [
     {
+      "name": "Policy & Claims Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire policy files, claims submissions, and third-party data (weather, property) from carriers, agents, and external sources.",
+      "triggers": ["policy file", "claims file", "carrier feed", "agent data", "weather data", "property data"],
+      "typical_tools": ["EDI 837", "Carrier API", "ISO data", "Weather API"],
+      "key_outputs": ["raw_policies", "raw_claims", "third_party_data"]
+    },
+    {
+      "name": "Policy & Claims Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Append geospatial risk scores, vehicle valuations, and occupancy data to enrich underwriting and claims records.",
+      "triggers": ["geospatial risk", "vehicle valuation", "property score", "risk enrichment", "geocode"],
+      "typical_tools": ["ISO risk score", "JD Power", "Geospatial API", "CoreLogic"],
+      "key_outputs": ["enriched_policies", "risk_score", "geocoded_records"]
+    },
+    {
+      "name": "Claims Data Preparation",
+      "lifecycle_stage": "preparation",
+      "description": "Normalise claim type codes, resolve duplicate claims, validate coverage limits, and build loss triangles.",
+      "triggers": ["loss triangle", "claim dedup", "coverage validate", "normalise claim", "claim preparation"],
+      "typical_tools": ["Actuarial reserving tool", "Rule-based DQ", "Triangle builder"],
+      "key_outputs": ["clean_claims", "loss_triangles", "dq_report"]
+    },
+    {
+      "name": "Regulatory Submission",
+      "lifecycle_stage": "syndication",
+      "description": "Submit rate filings, loss runs, and statutory financial statements to state regulators and reinsurers.",
+      "triggers": ["rate filing", "loss run", "statutory", "reinsurer", "regulator submission", "state filing"],
+      "typical_tools": ["SERFF", "Reinsurance portal", "XBRL"],
+      "key_outputs": ["filed_rates", "loss_run_report", "statutory_filing"]
+    },
+    {
       "name": "Claims Analytics",
+      "lifecycle_stage": "analytics",
       "description": "Analyse claim frequency, severity, and loss ratio to inform pricing and reserving.",
       "triggers": ["claim", "loss", "severity", "frequency", "reserve", "paid", "incurred", "adjuster"],
-      "typical_models": ["GLM", "Gradient Boosting", "Survival Analysis"],
+      "typical_tools": ["GLM", "Gradient Boosting", "Survival Analysis"],
       "key_outputs": ["loss_ratio", "severity_distribution", "reserve_estimate", "claim_forecast"]
     },
     {
       "name": "Fraud Detection",
+      "lifecycle_stage": "ml_modeling",
       "description": "Score claims for suspected fraud or abuse before payment.",
       "triggers": ["fraud", "suspicious", "duplicate_claim", "inflated", "staged", "referral_pattern"],
-      "typical_models": ["Isolation Forest", "XGBoost", "Network Analysis"],
+      "typical_tools": ["Isolation Forest", "XGBoost", "Network Analysis"],
       "key_outputs": ["fraud_score", "fraud_flag", "investigation_priority"]
     },
     {
       "name": "Premium Optimisation",
+      "lifecycle_stage": "ml_modeling",
       "description": "Model risk factors to price premiums more accurately by segment.",
       "triggers": ["premium", "exposure", "rate", "pricing", "risk_factor", "underwriting", "peril"],
-      "typical_models": ["GLM", "GBM", "Frequency-Severity Model"],
+      "typical_tools": ["GLM", "GBM", "Frequency-Severity Model"],
       "key_outputs": ["indicated_rate", "rate_change", "segment_risk_profile"]
-    }
-  ],
-
-  "Retail & E-commerce": [
-    {
-      "name": "Customer Churn Prediction",
-      "description": "Identify customers at risk of lapsing or reducing purchasing activity.",
-      "triggers": ["churn", "lapse", "inactive", "last_purchase", "retention", "rfm", "recency"],
-      "typical_models": ["XGBoost", "Logistic Regression", "Survival Analysis"],
-      "key_outputs": ["churn_probability", "risk_tier", "recommended_intervention"]
-    },
-    {
-      "name": "Demand Forecasting",
-      "description": "Forecast product demand by SKU, category, or location to inform inventory planning.",
-      "triggers": ["forecast", "demand", "sales_volume", "units_sold", "seasonality", "stockout"],
-      "typical_models": ["ARIMA", "Prophet", "LightGBM", "LSTM"],
-      "key_outputs": ["demand_forecast", "confidence_interval", "stockout_risk"]
-    },
-    {
-      "name": "Recommendation Engine",
-      "description": "Personalise product recommendations based on purchase history and browsing behaviour.",
-      "triggers": ["recommendation", "affinity", "basket", "co_purchase", "collaborative", "purchase_history"],
-      "typical_models": ["Collaborative Filtering", "Matrix Factorisation", "Neural CF"],
-      "key_outputs": ["recommended_products", "affinity_score", "expected_uplift"]
-    },
-    {
-      "name": "Pricing & Promotions Analysis",
-      "description": "Measure price elasticity and promotion effectiveness to optimise margin.",
-      "triggers": ["discount", "promotion", "price_change", "elasticity", "markdown", "margin"],
-      "typical_models": ["Regression", "A/B Test Analysis", "Causal Inference"],
-      "key_outputs": ["price_elasticity", "promo_lift", "optimal_price", "margin_impact"]
     }
   ],
 
   "HR & People Analytics": [
     {
+      "name": "HR System Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire employee records from HRIS, ATS, payroll, and engagement survey platforms.",
+      "triggers": ["hris", "workday", "successfactors", "ats", "payroll", "engagement survey", "hr data source"],
+      "typical_tools": ["Workday API", "SAP SuccessFactors", "ADP", "Survey platform"],
+      "key_outputs": ["raw_employee_records", "payroll_data", "survey_responses"]
+    },
+    {
+      "name": "People Data Harmonisation",
+      "lifecycle_stage": "preparation",
+      "description": "Resolve employee IDs across systems, normalise job grades and department codes, and reconcile hire/termination dates.",
+      "triggers": ["employee master", "dedup employee", "harmonise hr", "job grade normalise", "department code"],
+      "typical_tools": ["Entity resolution", "Rule-based DQ", "HRIS golden record"],
+      "key_outputs": ["master_employee_record", "dedup_report", "normalisation_log"]
+    },
+    {
+      "name": "HR Data Publishing",
+      "lifecycle_stage": "publishing",
+      "description": "Publish a unified people data mart for workforce analytics, compensation benchmarking, and DE&I reporting.",
+      "triggers": ["people mart", "workforce analytics", "dei data", "compensation benchmark", "hr analytics publish"],
+      "typical_tools": ["Snowflake", "Power BI dataset", "dbt"],
+      "key_outputs": ["people_data_mart", "freshness_lag", "consumer_count"]
+    },
+    {
       "name": "Attrition Prediction",
+      "lifecycle_stage": "ml_modeling",
       "description": "Identify employees at risk of leaving to support retention planning.",
       "triggers": ["attrition", "turnover", "resign", "left", "termination", "flight_risk", "voluntary"],
-      "typical_models": ["XGBoost", "Logistic Regression", "Survival Analysis"],
+      "typical_tools": ["XGBoost", "Logistic Regression", "Survival Analysis"],
       "key_outputs": ["attrition_probability", "risk_tier", "top_drivers", "retention_recommendation"]
     },
     {
       "name": "Compensation Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Audit pay equity and model compensation structures across levels and demographics.",
       "triggers": ["salary", "compensation", "pay", "bonus", "equity", "gender_pay", "band", "grade"],
-      "typical_models": ["Regression", "Descriptive Analytics", "Fairness Metrics"],
+      "typical_tools": ["Regression", "Descriptive Analytics", "Fairness Metrics"],
       "key_outputs": ["pay_gap", "compa_ratio", "equity_flag", "market_position"]
     },
     {
       "name": "Workforce Planning",
+      "lifecycle_stage": "analytics",
       "description": "Model headcount needs, hiring pipeline, and span-of-control targets.",
       "triggers": ["headcount", "hiring", "vacancy", "span_of_control", "capacity", "pipeline", "fte"],
-      "typical_models": ["Scenario Modeling", "Time Series", "Regression"],
+      "typical_tools": ["Scenario Modeling", "Time Series", "Regression"],
       "key_outputs": ["headcount_forecast", "hiring_target", "gap_analysis"]
+    }
+  ],
+
+  "Travel & Hospitality": [
+    {
+      "name": "Property & Rate Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire hotel property content, rate and availability feeds from GDS systems, OTAs, and direct channel managers.",
+      "triggers": ["gds", "channel manager", "rate feed", "property content", "availability feed", "amadeus", "sabre"],
+      "typical_tools": ["GDS API (Amadeus, Sabre)", "Channel manager API", "OTA extranet"],
+      "key_outputs": ["raw_property_content", "rate_feed", "availability_snapshot"]
+    },
+    {
+      "name": "Booking & Pricing Data Extraction",
+      "lifecycle_stage": "extraction",
+      "description": "Extract booking records, rate history, and occupancy data from PMS and reservation systems.",
+      "triggers": ["pms extract", "booking extract", "reservation data", "rate history", "occupancy data"],
+      "typical_tools": ["PMS API (Opera, Mews)", "OTA API", "SQL extract"],
+      "key_outputs": ["booking_history", "rate_history", "occupancy_timeseries"]
+    },
+    {
+      "name": "Destination Attribute Enrichment",
+      "lifecycle_stage": "enrichment",
+      "description": "Enrich destination records with experience scores, seasonal profiles, safety ratings, and cost-of-travel indices.",
+      "triggers": ["destination enrichment", "experience score", "safety rating", "cost index", "seasonal profile"],
+      "typical_tools": ["TripAdvisor API", "Numbeo", "Government safety index", "Weather API"],
+      "key_outputs": ["enriched_destination_profile", "experience_scores", "price_index"]
+    },
+    {
+      "name": "Rate & Content Normalisation",
+      "lifecycle_stage": "preparation",
+      "description": "Normalise rate currency, resolve property duplicate IDs, validate room type codes, and harmonise amenity classifications.",
+      "triggers": ["rate normalise", "currency convert", "property dedup", "room type", "amenity normalise"],
+      "typical_tools": ["Currency API", "Dedup engine", "Rule-based normaliser"],
+      "key_outputs": ["normalised_rates", "clean_property_records", "dq_score"]
+    },
+    {
+      "name": "OTA Listing Publication",
+      "lifecycle_stage": "publishing",
+      "description": "Publish verified property content and rates to OTA platforms and direct booking channels.",
+      "triggers": ["ota publish", "listing publish", "direct booking", "rate push", "content push"],
+      "typical_tools": ["OTA extranet API", "Channel manager", "PMS integration"],
+      "key_outputs": ["published_listings", "rate_parity_score", "time_to_publish"]
+    },
+    {
+      "name": "GDS & Meta-Search Syndication",
+      "lifecycle_stage": "syndication",
+      "description": "Distribute rates and availability to GDS networks (Amadeus, Sabre, Travelport) and meta-search engines (Google Hotels, Trivago).",
+      "triggers": ["gds syndication", "meta search", "google hotels", "trivago", "kayak", "distribution"],
+      "typical_tools": ["GDS connectivity", "Google Hotel Ads API", "Meta-search feed"],
+      "key_outputs": ["gds_coverage", "meta_search_impressions", "distribution_latency"]
+    },
+    {
+      "name": "Revenue Management Analytics",
+      "lifecycle_stage": "analytics",
+      "description": "Optimise room pricing, occupancy, and RevPAR using demand patterns and competitor rate intelligence.",
+      "triggers": ["revpar", "adr", "occupancy", "revenue management", "rate intelligence", "demand forecast"],
+      "typical_tools": ["Revenue Management System", "Competitor rate scraper", "Demand model"],
+      "key_outputs": ["optimal_rate", "revpar_forecast", "occupancy_forecast"]
     }
   ],
 
   "Education": [
     {
+      "name": "Student Data Acquisition",
+      "lifecycle_stage": "sourcing",
+      "description": "Acquire student records from SIS, LMS, assessment platforms, and attendance systems.",
+      "triggers": ["sis", "lms", "student data", "assessment platform", "attendance system", "canvas", "blackboard"],
+      "typical_tools": ["SIS API (PowerSchool)", "LMS API (Canvas)", "Assessment platform API"],
+      "key_outputs": ["raw_student_records", "assessment_results", "attendance_logs"]
+    },
+    {
+      "name": "Student Data Preparation",
+      "lifecycle_stage": "preparation",
+      "description": "Resolve student IDs across systems, normalise grade scales, and validate enrollment and cohort assignments.",
+      "triggers": ["student master", "grade normalise", "enrollment validate", "cohort assignment", "dedup student"],
+      "typical_tools": ["Entity resolution", "Grade scale mapping", "Rule-based DQ"],
+      "key_outputs": ["master_student_record", "normalised_grades", "cohort_map"]
+    },
+    {
       "name": "At-Risk Student Identification",
+      "lifecycle_stage": "ml_modeling",
       "description": "Flag students at risk of dropping out or failing based on attendance and performance signals.",
       "triggers": ["dropout", "at_risk", "attendance", "fail", "gpa", "intervention", "early_warning"],
-      "typical_models": ["Logistic Regression", "Random Forest", "XGBoost"],
+      "typical_tools": ["Logistic Regression", "Random Forest", "XGBoost"],
       "key_outputs": ["dropout_risk_score", "risk_tier", "recommended_intervention"]
     },
     {
       "name": "Course Effectiveness Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Measure the impact of courses, instructors, and interventions on student outcomes.",
       "triggers": ["course", "completion", "pass_rate", "instructor", "curriculum", "module_score"],
-      "typical_models": ["Regression", "A/B Analysis", "Multilevel Modeling"],
+      "typical_tools": ["Regression", "A/B Analysis", "Multilevel Modeling"],
       "key_outputs": ["pass_rate", "completion_rate", "effect_size", "course_ranking"]
-    }
-  ],
-
-  "Industrial Equipment": [
-    {
-      "name": "Predictive Maintenance",
-      "description": "Predict equipment failure or maintenance needs before they cause downtime.",
-      "triggers": ["failure", "maintenance", "fault", "breakdown", "vibration", "temperature", "anomaly", "sensor"],
-      "typical_models": ["Isolation Forest", "LSTM", "Random Forest", "Survival Analysis"],
-      "key_outputs": ["failure_probability", "remaining_useful_life", "maintenance_schedule", "fault_type"]
-    },
-    {
-      "name": "Asset Performance Management",
-      "description": "Track OEE, MTBF, and MTTR to optimise asset utilisation and reliability.",
-      "triggers": ["oee", "mtbf", "mttr", "uptime", "downtime", "availability", "performance_rate"],
-      "typical_models": ["Descriptive Analytics", "Control Charts", "Regression"],
-      "key_outputs": ["oee_score", "mtbf", "mttr", "availability_trend"]
-    },
-    {
-      "name": "Product Data Quality",
-      "description": "Assess and remediate completeness, consistency, and accuracy of equipment specifications.",
-      "triggers": ["specification", "attribute", "completeness", "catalogue", "product_id", "part_number"],
-      "typical_models": ["Rule-based DQ", "Anomaly Detection", "Clustering"],
-      "key_outputs": ["completeness_score", "anomaly_flags", "remediation_list"]
     }
   ],
 
   "General": [
     {
+      "name": "Data Pipeline Design",
+      "lifecycle_stage": "sourcing",
+      "description": "Design end-to-end data pipeline from source identification through to publishing for an unspecified domain.",
+      "triggers": ["pipeline", "data flow", "etl design", "architecture", "data strategy"],
+      "typical_tools": ["dbt", "Airflow", "Spark", "Cloud data platform"],
+      "key_outputs": ["pipeline_design", "source_inventory", "architecture_diagram"]
+    },
+    {
       "name": "Exploratory Data Analysis",
+      "lifecycle_stage": "analytics",
       "description": "Profile, summarise, and surface patterns in an unfamiliar dataset.",
       "triggers": [],
-      "typical_models": ["Descriptive Statistics", "Correlation Analysis", "Anomaly Detection"],
+      "typical_tools": ["Descriptive Statistics", "Correlation Analysis", "Anomaly Detection"],
       "key_outputs": ["data_profile", "quality_report", "top_findings"]
     }
   ]
