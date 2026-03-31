@@ -29,6 +29,16 @@ import json
 import os
 from typing import Optional
 
+# ── domain name aliases ───────────────────────────────────────────────────────
+# Maps detector-emitted domain names to the canonical name stored in domain_models.
+# Add entries here whenever the detector and the seeded model use different names.
+
+_DOMAIN_ALIASES: dict[str, str] = {
+    "Electrical Components": "Industrial Component",
+    "Industrial Equipment":  "Industrial Component",
+    "Mechanical Components": "Industrial Component",
+}
+
 # ── connection ────────────────────────────────────────────────────────────────
 
 def _load_env() -> None:
@@ -383,6 +393,11 @@ def _embed_model_nodes(conn, model_id: int, model_json: dict) -> int:
 
 # ── traversal ─────────────────────────────────────────────────────────────────
 
+def _resolve_domain(domain: str) -> str:
+    """Resolve a detector-emitted domain name to the canonical stored name."""
+    return _DOMAIN_ALIASES.get(domain, domain)
+
+
 def traverse_graph(
     conn,
     domain: str,
@@ -407,6 +422,8 @@ def traverse_graph(
     -------
     list of dicts: {node_type, node_key, node_text, score}
     """
+    domain = _resolve_domain(domain)
+
     try:
         import numpy as np
     except ImportError:
@@ -512,7 +529,10 @@ def get_domain_context(
     - All invariants for the domain (always included — they are rules)
 
     Returns a dict suitable for passing to render_domain_context().
+    Domain aliases are resolved automatically (e.g. 'Electrical Components' -> 'Industrial Component').
     """
+    domain = _resolve_domain(domain)
+
     # Get model overview
     with conn.cursor() as cur:
         cur.execute(

@@ -1,6 +1,61 @@
 {
   "_comment": "Domain-solution reference registry. Each domain maps to a list of named solution types. 'triggers' are column-name / value keywords that signal this solution. Edit freely — loaded at runtime by domain_detector.py.",
 
+  "Mechanical Components": [
+    {
+      "name": "Product Data Quality",
+      "description": "Assess and remediate specification completeness, grade compliance, and attribute consistency across mechanical component catalogues.",
+      "triggers": ["specification", "completeness", "part_number", "catalogue", "attribute", "grade", "compliance"],
+      "typical_models": ["Rule-based DQ", "Anomaly Detection", "Clustering"],
+      "key_outputs": ["completeness_score", "anomaly_flags", "grade_compliance_rate", "remediation_list"]
+    },
+    {
+      "name": "Fastener Selection & Compatibility",
+      "description": "Match fastener specifications to application requirements and flag incompatible pairings (thread mismatch, grade underspec, material incompatibility).",
+      "triggers": ["fastener", "bolt", "thread", "torque", "material", "grade", "compatibility", "tensile"],
+      "typical_models": ["Rule engine", "Constraint Reasoning", "Classification"],
+      "key_outputs": ["compatibility_flag", "recommended_grade", "torque_spec", "substitution_list"]
+    },
+    {
+      "name": "Predictive Maintenance",
+      "description": "Predict mechanical component wear or failure based on load cycles, material fatigue, and environmental exposure.",
+      "triggers": ["failure", "wear", "fatigue", "cycle", "load", "maintenance", "replacement"],
+      "typical_models": ["Survival Analysis", "Random Forest", "LSTM"],
+      "key_outputs": ["failure_probability", "remaining_useful_life", "maintenance_schedule"]
+    }
+  ],
+
+  "Wellness": [
+    {
+      "name": "Wellness Risk Scoring",
+      "description": "Score individuals across the six wellness pillars (physical fitness, psychological wellbeing, diet, social relations, medical conditions, substance absence) to identify those at risk of wellness decline.",
+      "triggers": ["wellness", "pillar", "fitness_score", "mental_health", "diet_quality", "social_relations", "substance_use", "medical_conditions"],
+      "typical_models": ["Composite Scoring", "Logistic Regression", "XGBoost"],
+      "key_outputs": ["overall_wellness_score", "pillar_scores", "risk_tier", "recommended_interventions"]
+    },
+    {
+      "name": "Mental Health Screening",
+      "description": "Apply validated screening instruments (PHQ-9, GAD-7) to identify individuals at risk of depression or anxiety.",
+      "triggers": ["phq", "gad", "depression", "anxiety", "mental_health_score", "mood", "stress"],
+      "typical_models": ["Threshold Scoring (PHQ-9/GAD-7)", "Logistic Regression", "Classification"],
+      "key_outputs": ["phq9_score", "gad7_score", "risk_level", "referral_flag"]
+    },
+    {
+      "name": "Behaviour Change Analytics",
+      "description": "Track habit formation, relapse risk, and engagement trends across wellness programme participants.",
+      "triggers": ["habit", "clean_days", "substance_use", "adherence", "engagement", "streak", "relapse"],
+      "typical_models": ["Survival Analysis", "Time Series", "Logistic Regression"],
+      "key_outputs": ["adherence_rate", "relapse_risk_score", "streak_length", "engagement_trend"]
+    },
+    {
+      "name": "Population Health Profiling",
+      "description": "Segment a population by wellness pillar performance to prioritise programme resources and interventions.",
+      "triggers": ["population", "segment", "pillar_completion", "cohort", "programme", "wellbeing_index"],
+      "typical_models": ["K-Means Clustering", "Descriptive Analytics", "Composite Indexing"],
+      "key_outputs": ["population_segments", "pillar_gap_analysis", "programme_prioritisation"]
+    }
+  ],
+
   "Healthcare": [
     {
       "name": "Mortality Prediction",

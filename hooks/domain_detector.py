@@ -59,6 +59,13 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
         "formulation", "excipient", "bioavailability", "pharmacokinetics", "smiles",
         "compound", "assay", "indication", "contraindication", "generic", "brand",
     ]),
+    ("Mechanical Components", [
+        "fastener", "bolt", "screw", "nut", "washer", "rivet", "pin", "anchor",
+        "thread", "tensile_strength", "shear_strength", "torque_spec", "thread_pitch",
+        "thread_size", "hex", "socket_head", "carriage_bolt", "stud", "clamp",
+        "flange", "gasket", "o_ring", "seal", "bearing", "bushing", "shaft",
+        "keyway", "coupling", "ISO 4014", "DIN 931", "grade", "pitch",
+    ]),
     ("Industrial Equipment", [
         "voltage", "current", "ampere", "watt", "torque", "rpm", "bearing", "motor",
         "actuator", "sensor", "plc", "scada", "pump", "valve", "compressor",
@@ -68,7 +75,14 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
     ("Electrical Components", [
         "voltage_rating", "current_rating", "ip_rating", "din_rail", "terminal_block",
         "connector", "plug", "socket", "pcb", "smd", "resistor", "capacitor",
-        "inductance", "impedance", "frequency", "poles", "contact", "crimp", "screw",
+        "inductance", "impedance", "frequency", "poles", "contact", "crimp",
+    ]),
+    ("Wellness", [
+        "wellness", "wellbeing", "pillar", "phq", "gad", "fitness_score",
+        "physical_fitness", "mental_health", "mood", "stress", "habit",
+        "substance_use", "substance_abuse", "diet_quality", "nutrition",
+        "social_relations", "sleep_quality", "mindfulness", "resilience",
+        "vo2max", "resting_hr", "clean_days", "audit", "cage",
     ]),
     ("Financial Services / Lending", [
         "loan", "credit", "interest", "apr", "fico", "ltv", "dti", "delinquency",
@@ -96,7 +110,7 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
         "absence", "job_level", "band", "promotion", "diversity",
     ]),
     ("Education", [
-        "student", "grade", "course", "enrollment", "attendance", "score", "exam",
+        "student", "grade", "course", "enrollment", "attendance", "exam",
         "teacher", "school", "district", "gpa", "module", "assignment", "cohort",
     ]),
 ]
@@ -120,6 +134,12 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "analysis_lens": "Focus on compound efficacy signals, adverse event frequencies, trial phase outcomes, and regulatory compliance data quality.",
         "anomaly_guidance": "Flag impossible dose values, adverse event severity mismatches, trial protocol deviations, and molecular property outliers.",
         "key_metrics": ["efficacy rate", "adverse event incidence", "trial dropout rate", "bioavailability", "IC50"],
+    },
+    "Mechanical Components": {
+        "role": "mechanical engineering data analyst specialising in fastener specifications, material grades, and joining technology",
+        "analysis_lens": "Focus on specification completeness (thread size, grade, material, torque), standards compliance (ISO/DIN/ASME), and compatibility between fastener and mating components.",
+        "anomaly_guidance": "Flag missing grade or material fields, impossible thread pitch/size combinations, tensile strength values outside grade norms, duplicate part numbers, and non-standard coating codes.",
+        "key_metrics": ["specification completeness %", "grade distribution", "material compliance rate", "catalogue coverage %", "anomaly rate by attribute"],
     },
     "Industrial Equipment": {
         "role": "industrial equipment data analyst specialising in specifications, maintenance, and asset performance",
@@ -168,6 +188,12 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "analysis_lens": "Focus on grade distributions, attendance-outcome correlations, at-risk student signals, and course completion rates.",
         "anomaly_guidance": "Flag grades outside valid range, negative attendance counts, future exam dates, duplicate student IDs, and impossible cohort/year combinations.",
         "key_metrics": ["pass rate", "dropout rate", "attendance rate", "average GPA", "course completion rate"],
+    },
+    "Wellness": {
+        "role": "wellness and preventive health analyst with expertise in multi-pillar wellness scoring, behaviour change, and population health",
+        "analysis_lens": "Focus on the six wellness pillars: physical fitness, psychological wellbeing, diet/nutrition, social relations, medical conditions, and substance absence. Assess pillar scores, identify gaps, and surface individuals at risk of wellness decline.",
+        "anomaly_guidance": "Flag pillar scores outside validated scale ranges (e.g. PHQ-9 > 27), missing mandatory assessments, extreme diet or activity outliers, inconsistent substance use logs, and duplicate user records.",
+        "key_metrics": ["overall wellness score", "pillar completion rate", "at-risk population %", "PHQ-9 score", "GAD-7 score", "diet quality index", "active days/week", "clean days"],
     },
     "General": {
         "role": "data analyst with broad expertise in tabular data quality, statistical analysis, and business intelligence",
@@ -258,6 +284,12 @@ def _heuristic_domain(df: pd.DataFrame) -> str:
     # Resolve ambiguity: GPO/supply chain beats generic Healthcare
     if best == "Healthcare" and scores.get("Healthcare Supply Chain / GPO", 0) >= scores["Healthcare"]:
         best = "Healthcare Supply Chain / GPO"
+    # Resolve ambiguity: Wellness beats Healthcare when wellness signals dominate
+    if best == "Healthcare" and scores.get("Wellness", 0) >= scores["Healthcare"]:
+        best = "Wellness"
+    # Resolve ambiguity: Mechanical Components beats Electrical Components when fastener signals present
+    if best == "Electrical Components" and scores.get("Mechanical Components", 0) >= scores["Electrical Components"]:
+        best = "Mechanical Components"
     # Resolve ambiguity between Industrial Equipment and Electrical Components
     if best == "Industrial Equipment" and scores.get("Electrical Components", 0) >= scores["Industrial Equipment"]:
         best = "Electrical Components"
