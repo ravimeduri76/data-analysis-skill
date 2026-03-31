@@ -37,6 +37,7 @@ _DOMAIN_ALIASES: dict[str, str] = {
     "Electrical Components": "Industrial Component",
     "Industrial Equipment":  "Industrial Component",
     "Mechanical Components": "Industrial Component",
+    "Wellness":              "Healthcare",
 }
 
 # ── connection ────────────────────────────────────────────────────────────────

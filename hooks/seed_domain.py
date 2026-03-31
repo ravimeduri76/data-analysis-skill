@@ -22,11 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hooks.domain_graph import get_domain_conn, init_domain_db, save_domain_model
 
 _MODELS = [
-    os.path.join(
-        os.path.expanduser("~"),
-        "Documents",
-        "Relays_domain_model.json",
-    ),
+    os.path.join(os.path.expanduser("~"), "Documents", "Relays_domain_model.json"),
+    os.path.join(os.path.expanduser("~"), "Documents", "Healthcare_MedicationManagement_domain_model.json"),
+    os.path.join(os.path.expanduser("~"), "Documents", "Ecommerce_domain_model.json"),
+    os.path.join(os.path.expanduser("~"), "Documents", "TravelHospitality_domain_model.json"),
 ]
 
 
