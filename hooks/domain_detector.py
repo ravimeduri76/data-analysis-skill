@@ -52,6 +52,18 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
         "acute care", "ambulatory", "home care", "long term care", "pharmacy",
         "membership start", "membership termination", "active member",
     ]),
+    ("Healthcare Revenue Cycle Management", [
+        "invoiceadjustment", "invoicelineitem", "claimbillstatus", "invoiceserviceline",
+        "payorname", "payorid", "payortypename", "payorfrequency", "payorfrequency",
+        "adjustmenttype", "adjustmentgroupdesc", "adjustmentcategory", "adjustmentname",
+        "invoiceno", "invoicestatus", "invoicepostdate", "invoicelineitemrate",
+        "denial", "denialcode", "remittance", "era", "eob", "835", "277",
+        "prior authorization", "preauth", "eligibility", "elig", "auth",
+        "clean claim", "writeoff", "write-off", "contractual adjustment",
+        "revenue offset", "timely filing", "undo transfer balance",
+        "payor entry error", "hipps", "pdgm", "perdiem", "per diem",
+        "home health", "hospice", "behavioral health",
+    ]),
     ("Healthcare", [
         "patient", "diagnosis", "icd", "cpt", "admission", "discharge", "clinical",
         "medication", "dosage", "ehr", "emr", "procedure", "symptom", "encounter",
@@ -127,6 +139,12 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
 
 # Domain-specific role descriptions and analytical lenses
 _DOMAIN_PROFILES: dict[str, dict] = {
+    "Healthcare Revenue Cycle Management": {
+        "role": "healthcare revenue cycle analyst with expertise in claims billing, payer contract management, denial management, and cash collections",
+        "analysis_lens": "Focus on adjustment rate by payer and service line, controllable vs non-controllable write-offs, denial root cause (eligibility/auth vs clinical vs billing), days in AR, clean claim rate, and concentration of loss across the payer mix.",
+        "anomaly_guidance": "Flag adjustment rates > 10% of billed for any payer (investigate contract terms or billing errors), PERDIEM payers with high write-off % (R&B rate issues), Payor Entry Error / Elig-Auth adjustments (real-time eligibility check gap), Undo Transfer Balance spikes (billing system workflow defect), negative invoicepostDate-to-ServiceDate gaps (data entry errors), and single-payer concentration driving > 30% of total write-offs.",
+        "key_metrics": ["adjustment rate % of billed", "controllable write-off amount", "clean claim rate", "days in AR", "denial rate by payer type", "first-pass resolution rate", "payer concentration (HHI)"],
+    },
     "Healthcare Supply Chain / GPO": {
         "role": "healthcare supply chain analyst with expertise in GPO membership, contract analytics, and provider network performance",
         "analysis_lens": "Focus on member retention and churn risk, contract penetration rates, purchasing compliance by class of trade, facility segmentation, and network growth/attrition trends.",
@@ -374,6 +392,9 @@ def _heuristic_domain(df: pd.DataFrame) -> str:
     if not scores:
         return "General"
     best = max(scores, key=lambda d: scores[d])
+    # Resolve ambiguity: RCM beats generic Healthcare when billing/claims signals dominate
+    if best == "Healthcare" and scores.get("Healthcare Revenue Cycle Management", 0) >= scores["Healthcare"]:
+        best = "Healthcare Revenue Cycle Management"
     # Resolve ambiguity: GPO/supply chain beats generic Healthcare
     if best == "Healthcare" and scores.get("Healthcare Supply Chain / GPO", 0) >= scores["Healthcare"]:
         best = "Healthcare Supply Chain / GPO"

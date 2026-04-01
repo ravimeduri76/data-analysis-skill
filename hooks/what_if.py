@@ -19,6 +19,50 @@ import pandas as pd
 # ── Domain knowledge base ─────────────────────────────────────────────────────
 
 _DOMAIN_WHAT_IF: dict = {
+    "Healthcare Revenue Cycle Management": [
+        {
+            "missing_data": "ERA 835 / remittance advice data (actual cash received per claim)",
+            "current_limitation": "Dataset shows billed amounts and adjustments but not final cash receipts — cannot compute true net collection rate or days-cash-outstanding",
+            "what_unlocks": "True net collection rate by payer; cash flow forecasting; underpayment detection (paid less than contractual rate); denial-to-payment reconciliation",
+            "data_source": "Clearinghouse ERA feed; practice management system payment posting module",
+            "priority": "high",
+        },
+        {
+            "missing_data": "Denial timestamps (date denied, date appealed, date resolved)",
+            "current_limitation": "Cannot compute time-to-denial, appeal success rate, or days in AR by denial reason — the single most actionable metric for RCM speed improvement",
+            "what_unlocks": "Days-in-AR by payer and denial type; appeal overturn rate; SLA compliance tracking; identification of payers that delay then deny",
+            "data_source": "Claims management system denial log; clearinghouse 277CA transaction",
+            "priority": "high",
+        },
+        {
+            "missing_data": "Prior authorization tracking (PA obtained Y/N, PA date, auth number)",
+            "current_limitation": "PAYOR ENTRY ERROR – ELIG/AUTH is the #1 write-off driver ($263K) but we cannot tell whether auth was obtained, expired, or never requested",
+            "what_unlocks": "Root cause split: missing vs expired vs wrong auth; pre-service auth compliance rate; auth-to-denial correlation by payer and service type",
+            "data_source": "Utilisation management system; EMR order entry auth field",
+            "priority": "high",
+        },
+        {
+            "missing_data": "Eligibility verification log (verified Y/N, verification date, eligibility source)",
+            "current_limitation": "Cannot distinguish Elig/Auth write-offs caused by verification failure vs payer data errors vs patient coverage gaps",
+            "what_unlocks": "Eligibility verification compliance rate; payer-specific eligibility error patterns; ROI on real-time eligibility tools",
+            "data_source": "Patient access / front-end eligibility verification system; 270/271 transaction log",
+            "priority": "high",
+        },
+        {
+            "missing_data": "Claim submission date and payer adjudication date",
+            "current_limitation": "Only invoicepostDate is available — cannot compute true days-in-AR (submission to payment) or identify payers that hold claims beyond contractual timely payment obligations",
+            "what_unlocks": "Days-in-AR by payer; timely payment compliance monitoring; late payment interest calculation; payer SLA benchmarking",
+            "data_source": "Clearinghouse submission log; 835 adjudication date field",
+            "priority": "medium",
+        },
+        {
+            "missing_data": "Patient financial responsibility (co-pay, deductible, co-insurance amounts)",
+            "current_limitation": "Self Pay write-offs ($7,973) cannot be distinguished from primary payer balance transfers vs true self-pay accounts",
+            "what_unlocks": "Patient responsibility estimation accuracy; collection agency referral timing; charity care vs bad debt split",
+            "data_source": "Eligibility 271 response; explanation of benefits; patient financial counselling notes",
+            "priority": "medium",
+        },
+    ],
     "Healthcare": [
         {
             "missing_data": "Contract and spend data per provider",
