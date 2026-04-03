@@ -470,26 +470,20 @@ def suggest_what_if(
             suggestions.append(engage_suggestion)
 
     # 4 (optional). Claude-enhanced suggestions
-    if anthropic_api_key:
+    from hooks.llm_client import call_llm
+    col_sample = ", ".join(list(df.columns)[:30])
+    llm_prompt = (
+        f"You are a data strategy advisor. A {domain} dataset has been analysed.\n"
+        f"Columns: {col_sample}\n"
+        f"Suggest 2-3 additional data sources that would most improve this analysis.\n"
+        f"Return only a JSON array of objects, each with keys: "
+        f"missing_data, current_limitation, what_unlocks, data_source, priority "
+        f"(priority must be 'high', 'medium', or 'low').\n"
+        f"No commentary, no code fences -- raw JSON array only."
+    )
+    text = call_llm(llm_prompt, max_tokens=600, expect_json=True)
+    if text:
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=anthropic_api_key)
-            col_sample = ", ".join(list(df.columns)[:30])
-            prompt = (
-                f"You are a data strategy advisor. A {domain} dataset has been analysed.\n"
-                f"Columns: {col_sample}\n"
-                f"Suggest 2-3 additional data sources that would most improve this analysis.\n"
-                f"Return only a JSON array of objects, each with keys: "
-                f"missing_data, current_limitation, what_unlocks, data_source, priority "
-                f"(priority must be 'high', 'medium', or 'low').\n"
-                f"No commentary, no code fences -- raw JSON array only."
-            )
-            resp = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=600,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.content[0].text.strip()
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
             extra = json.loads(text)

@@ -675,16 +675,12 @@ Reply with ONLY valid JSON (no markdown fences):
 Include 0-3 mutations. Only reference columns from the available features list.
 Focus on what the previous results suggest would improve {primary_metric}."""
 
+    from hooks.llm_client import call_llm
+    text = call_llm(prompt, max_tokens=800, expect_json=True)
+    if text is None:
+        log.warning("propose_next_experiment: no LLM response -- falling back to variations")
+        return None
     try:
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=anthropic_api_key)
-        resp = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=800,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.content[0].text.strip()
-        # Strip markdown code fences if present
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         proposal = json.loads(text)
@@ -888,12 +884,8 @@ def _update_strategy(
     )
     imp_text = "\n".join(f"  {name}: {val:.4f}" for name, val in importances[:10])
 
-    if anthropic_api_key:
-        try:
-            import anthropic as _anthropic
-            client = _anthropic.Anthropic(api_key=anthropic_api_key)
-
-            prompt = f"""You are updating an ML experiment strategy document.
+    from hooks.llm_client import call_llm
+    strategy_prompt = f"""You are updating an ML experiment strategy document.
 Current strategy:
 {current[:1500]}
 
@@ -912,16 +904,10 @@ Rewrite the strategy document (max 800 words). Include:
 Keep the same markdown structure (## Setup, ## Hypotheses, ## What Worked, ## What Didn't Work).
 Output ONLY the markdown content, no code fences."""
 
-            resp = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            updated = resp.content[0].text.strip()
-            _save_strategy(strategy_path, updated)
-            return updated
-        except Exception as exc:
-            log.warning("LLM strategy update failed: %s -- using template", exc)
+    llm_text = call_llm(strategy_prompt, max_tokens=500)
+    if llm_text:
+        _save_strategy(strategy_path, llm_text)
+        return llm_text
 
     # Template-based fallback
     updated = (

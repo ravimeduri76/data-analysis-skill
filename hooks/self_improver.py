@@ -113,26 +113,18 @@ def review_run(
     anthropic_api_key: Optional[str] = None,
 ) -> dict:
     """Ask Claude (or heuristics) to analyse the run and suggest improvements."""
-    if anthropic_api_key:
+    from hooks.llm_client import call_llm
+    text = call_llm(
+        _REVIEW_PROMPT.format(meta_json=json.dumps(run_meta, indent=2, default=str)),
+        max_tokens=900,
+        expect_json=True,
+    )
+    if text:
         try:
-            import anthropic as _anthropic
-            client = _anthropic.Anthropic(api_key=anthropic_api_key)
-            resp = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=900,
-                messages=[{
-                    "role": "user",
-                    "content": _REVIEW_PROMPT.format(
-                        meta_json=json.dumps(run_meta, indent=2, default=str)
-                    ),
-                }],
-            )
-            text = resp.content[0].text.strip()
-            # Strip markdown code fences if present
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
             suggestions = json.loads(text)
-            suggestions["_review_method"] = "claude"
+            suggestions["_review_method"] = "llm"
             return suggestions
         except Exception as exc:
             suggestions = _heuristic_review(run_meta)

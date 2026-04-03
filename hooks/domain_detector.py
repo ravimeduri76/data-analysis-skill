@@ -586,14 +586,10 @@ def detect_domain(
             f"SUMMARY: <one paragraph, max 80 words>"
         )
         try:
-            import anthropic as _anthropic
-            client = _anthropic.Anthropic(api_key=anthropic_api_key)
-            resp = client.messages.create(
-                model=claude_model,
-                max_tokens=300,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = resp.content[0].text.strip()
+            from hooks.llm_client import call_llm
+            text = call_llm(prompt, max_tokens=300)
+            if text is None:
+                raise RuntimeError("No LLM response")
 
             domain = "General"
             confidence = "medium"

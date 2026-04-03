@@ -917,22 +917,20 @@ def _build_llm_prompt(
 
 
 def _call_llm(api_key: str, messages: list[dict]) -> Optional[dict]:
-    """Call Claude API for plan resolution. Returns parsed JSON or None."""
-    try:
-        import anthropic
-    except ImportError:
-        return None
+    """Call LLM for plan resolution. Returns parsed JSON or None."""
+    from hooks.llm_client import call_llm
 
+    # messages list has a single user message; extract it
+    user_content = messages[0]["content"] if messages else ""
+    text = call_llm(
+        user_content,
+        max_tokens=1024,
+        system=_LLM_SYSTEM_PROMPT,
+        expect_json=True,
+    )
+    if text is None:
+        return None
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=_LLM_SYSTEM_PROMPT,
-            messages=messages,
-        )
-        text = response.content[0].text.strip()
-        # Strip markdown fences if present
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text[3:]
             if text.endswith("```"):

@@ -18,3 +18,7 @@
 ## 2026-03-31 14:35 UTC
 
 - [ ] Domain mismatch on 'C:\Users\Ravi\Downloads\Invoice line item and Adjustment Details 02-2023 to 03-2024.xlsx': domain_mismatch: detected Healthcare (generic), actual Healthcare Revenue Cycle Management / Claims & Billing
+
+## 2026-04-03 06:30 UTC
+
+- [ ] refine data preprocessing to better handle missing or outliers in the dataset

@@ -69,7 +69,7 @@ def _kaggle_list(sort_by: str, page: int) -> list[dict]:
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30,
+            cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
         )
     except FileNotFoundError:
         log.error("kaggle CLI not found — run: pip install kaggle")
@@ -79,9 +79,13 @@ def _kaggle_list(sort_by: str, page: int) -> list[dict]:
         return []
 
     if result.returncode != 0:
-        err = result.stderr.strip() or result.stdout.strip()
-        log.warning("kaggle CLI error: %s", err)
-        return []
+        # Kaggle CLI on Windows may return non-zero due to encoding issues
+        # but still produce valid CSV on stdout — try to use it
+        if not result.stdout.strip():
+            err = result.stderr.strip()
+            log.warning("kaggle CLI error: %s", err)
+            return []
+        log.debug("kaggle CLI returned %d but has stdout — proceeding", result.returncode)
 
     lines = result.stdout.strip().splitlines()
     if len(lines) < 2:
@@ -167,7 +171,7 @@ def download_dataset(slug: str, dest_dir: str) -> list[str]:
     ]
     log.info("Downloading %s -> %s", slug, dest)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         log.error("Download timed out for %s", slug)
         return []

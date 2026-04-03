@@ -16,6 +16,7 @@ anomaly_summary(summary_df)  -> str   plain-English narrative
 
 from __future__ import annotations
 
+import os
 import re
 import json
 import difflib
@@ -196,12 +197,10 @@ def _judge_claude(
     )
 
     try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=60,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.content[0].text.strip()
+        from hooks.llm_client import call_llm
+        text = call_llm(prompt, max_tokens=60)
+        if text is None:
+            return "UNKNOWN", 0.0, "No LLM response"
         verdict, score, reason = "ANOMALY", 0.5, ""
         for line in text.splitlines():
             line = line.strip()
@@ -335,17 +334,13 @@ def detect_anomalies(
     # If a column appears in both, numeric wins
     process_cat -= process_num
 
-    # ── Set up Claude client ─────────────────────────────────────────────────
-    claude_client = None
-    if anthropic_api_key:
-        try:
-            import anthropic
-            claude_client = anthropic.Anthropic(api_key=anthropic_api_key)
-        except ImportError:
-            print(
-                "Warning: 'anthropic' not installed — Claude judgment skipped. "
-                "Run: pip install anthropic"
-            )
+    # ── Set up LLM availability flag ─────────────────────────────────────────
+    from hooks.llm_client import call_llm as _call_llm_fn
+    _llm_available = bool(
+        os.environ.get("GROQ_API_KEY", "").strip()
+        or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    )
+    claude_client = _llm_available  # truthy sentinel for downstream checks
 
     # ── Numeric processing ───────────────────────────────────────────────────
     for col in sorted(process_num):
