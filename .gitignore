@@ -18,6 +18,12 @@ build/
 # PNGs are committed; CSVs are excluded (may contain analysis data)
 output/*.csv
 output/*.xlsx
+output/kaggle_daily/
+output/deso_pipeline_test_*
+output/readmission_experiment/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # OS
 .DS_Store

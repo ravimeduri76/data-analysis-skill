@@ -120,7 +120,7 @@ def quality_report(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for col in df.columns:
         s = df[col]
-        is_numeric = pd.api.types.is_numeric_dtype(s)
+        is_numeric = pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s)
         null_pct   = round(s.isna().mean() * 100, 2)
         unique     = int(s.nunique())
         unique_pct = round(unique / n * 100, 2) if n > 0 else 0.0
