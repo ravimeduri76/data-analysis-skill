@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -199,16 +200,22 @@ def upsert_agent_card(
     runtime_hint: str = "sync",
     hitl_required: bool = False,
     notes: Optional[str] = None,
+    app_id: str = "base",
 ) -> int:
-    """Insert or update an agent card. Returns the card id."""
+    """Insert or update an agent card. Returns the card id.
+
+    Parameters
+    ----------
+    app_id : Application scope (default 'base')
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO agent_cards
                 (agent_id, name, type, lifecycle_stage, domain, capability,
                  skill_workflow, ingress_schema, egress_schema, runtime_hint,
-                 hitl_required, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 hitl_required, notes, app_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (agent_id) DO UPDATE
               SET name            = EXCLUDED.name,
                   type            = EXCLUDED.type,
@@ -220,7 +227,8 @@ def upsert_agent_card(
                   egress_schema   = EXCLUDED.egress_schema,
                   runtime_hint    = EXCLUDED.runtime_hint,
                   hitl_required   = EXCLUDED.hitl_required,
-                  notes           = EXCLUDED.notes
+                  notes           = EXCLUDED.notes,
+                  app_id          = EXCLUDED.app_id
             RETURNING id
             """,
             (
@@ -228,7 +236,7 @@ def upsert_agent_card(
                 skill_workflow,
                 json.dumps(ingress_schema) if ingress_schema else None,
                 json.dumps(egress_schema) if egress_schema else None,
-                runtime_hint, hitl_required, notes,
+                runtime_hint, hitl_required, notes, app_id,
             ),
         )
         return cur.fetchone()[0]
@@ -263,10 +271,16 @@ def list_agent_cards(
     conn,
     type_filter: Optional[str] = None,
     domain_filter: Optional[str] = None,
+    app_id: str = "base",
 ) -> list[dict]:
-    """List agent cards with optional type/domain filters."""
-    conditions: list[str] = []
-    params: list = []
+    """List agent cards with optional type/domain/app filters.
+
+    Parameters
+    ----------
+    app_id : Application scope — sees own agents + 'base' agents (default 'base')
+    """
+    conditions: list[str] = ["(app_id = %s OR app_id = 'base')"]
+    params: list = [app_id]
     if type_filter:
         conditions.append("type = %s")
         params.append(type_filter)
@@ -310,15 +324,23 @@ def upsert_execution_plan(
     domains: Optional[list[str]] = None,
     requires_dataset: bool = True,
     conditions: Optional[dict] = None,
+    app_id: str = "base",
+    solution_id: Optional[str] = None,
 ) -> int:
-    """Insert or update an execution plan template. Returns plan id."""
+    """Insert or update an execution plan template. Returns plan id.
+
+    Parameters
+    ----------
+    app_id      : Application scope (default 'base')
+    solution_id : Solution scope within the app (default None = app-wide)
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO execution_plans
                 (name, label, description, intent_patterns, lifecycle_stages,
-                 domains, requires_dataset, conditions)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                 domains, requires_dataset, conditions, app_id, solution_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (name) DO UPDATE
               SET label            = EXCLUDED.label,
                   description      = EXCLUDED.description,
@@ -326,7 +348,9 @@ def upsert_execution_plan(
                   lifecycle_stages = EXCLUDED.lifecycle_stages,
                   domains          = EXCLUDED.domains,
                   requires_dataset = EXCLUDED.requires_dataset,
-                  conditions       = EXCLUDED.conditions
+                  conditions       = EXCLUDED.conditions,
+                  app_id           = EXCLUDED.app_id,
+                  solution_id      = EXCLUDED.solution_id
             RETURNING id
             """,
             (
@@ -334,6 +358,7 @@ def upsert_execution_plan(
                 intent_patterns, lifecycle_stages, domains,
                 requires_dataset,
                 json.dumps(conditions) if conditions else None,
+                app_id, solution_id,
             ),
         )
         return cur.fetchone()[0]
@@ -742,31 +767,52 @@ def find_candidate_plans(
     limit: int = 5,
     domain_filter: Optional[str] = None,
     lifecycle_filter: Optional[str] = None,
+    app_id: str = "base",
+    solution_id: Optional[str] = None,
 ) -> list[dict]:
     """Embed query and return top-k execution plans ranked by cosine similarity.
 
     Falls back to keyword search over plan names/descriptions if BGE-M3 unavailable.
+
+    Parameters
+    ----------
+    app_id      : Application scope — sees own plans + 'base' plans (default 'base')
+    solution_id : Optional solution scope — if set, also sees solution-specific plans
     """
     model = _get_embed_model()
     if model is None:
-        return _keyword_plan_search(conn, query, limit, domain_filter)
+        return _keyword_plan_search(conn, query, limit, domain_filter, app_id)
 
     try:
         import numpy as np
     except ImportError:
-        return _keyword_plan_search(conn, query, limit, domain_filter)
+        return _keyword_plan_search(conn, query, limit, domain_filter, app_id)
 
     q_vec = model.encode([query], normalize_embeddings=True)[0]
 
-    conditions: list[str] = []
-    params: list = []
+    # App-scoped: own + base; solution-scoped: own + NULL
+    conditions: list[str] = ["(app_id = %s OR app_id = 'base')"]
+    params: list = [app_id]
+    if solution_id:
+        conditions.append("(solution_id = %s OR solution_id IS NULL)")
+        params.append(solution_id)
     if domain_filter:
-        conditions.append("(%s = ANY(domains) OR 'Any' = ANY(domains))")
-        params.append(domain_filter)
+        # Include all domains declared by the app manifest
+        domain_set = {domain_filter}
+        if app_id != "base":
+            try:
+                from app_registry import load_app_manifest
+                app_manifest = load_app_manifest(app_id)
+                domain_set.update(app_manifest.get("domains", []))
+            except (ImportError, FileNotFoundError):
+                pass
+        domain_or_parts = " OR ".join(["%s = ANY(domains)"] * len(domain_set))
+        conditions.append(f"({domain_or_parts} OR 'Any' = ANY(domains))")
+        params.extend(sorted(domain_set))
     if lifecycle_filter:
         conditions.append("%s = ANY(lifecycle_stages)")
         params.append(lifecycle_filter)
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = "WHERE " + " AND ".join(conditions)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -781,7 +827,7 @@ def find_candidate_plans(
         rows = cur.fetchall()
 
     if not rows:
-        return _keyword_plan_search(conn, query, limit, domain_filter)
+        return _keyword_plan_search(conn, query, limit, domain_filter, app_id)
 
     results = []
     for row in rows:
@@ -805,6 +851,7 @@ def _keyword_plan_search(
     query: str,
     limit: int,
     domain_filter: Optional[str],
+    app_id: str = "base",
 ) -> list[dict]:
     """Keyword fallback: search plan names, labels, descriptions."""
     tokens = [t.lower() for t in query.split() if len(t) > 2]
@@ -814,31 +861,48 @@ def _keyword_plan_search(
         ["LOWER(name) LIKE %s OR LOWER(label) LIKE %s OR LOWER(description) LIKE %s"] * len(tokens)
     )
     like_params = [v for t in tokens for v in (f"%{t}%", f"%{t}%", f"%{t}%")]
+    app_clause = "AND (app_id = %s OR app_id = 'base')"
     domain_clause = ""
-    extra_params: list = []
+    extra_params: list = [app_id]
     if domain_filter:
-        domain_clause = "AND (%s = ANY(domains) OR 'Any' = ANY(domains))"
-        extra_params.append(domain_filter)
+        domain_set = {domain_filter}
+        if app_id != "base":
+            try:
+                from app_registry import load_app_manifest
+                app_manifest = load_app_manifest(app_id)
+                domain_set.update(app_manifest.get("domains", []))
+            except (ImportError, FileNotFoundError):
+                pass
+        domain_or_parts = " OR ".join(["%s = ANY(domains)"] * len(domain_set))
+        domain_clause = f"AND ({domain_or_parts} OR 'Any' = ANY(domains))"
+        extra_params.extend(sorted(domain_set))
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT id, name, label, description, intent_patterns,
                    lifecycle_stages, domains, requires_dataset
             FROM execution_plans
-            WHERE ({like_clauses}) {domain_clause}
+            WHERE ({like_clauses}) {app_clause} {domain_clause}
             LIMIT %s
             """,
             like_params + extra_params + [limit],
         )
         rows = cur.fetchall()
-    return [
-        {
+    # Score by token overlap ratio instead of flat 1.0
+    results = []
+    for r in rows:
+        plan_text = f"{r[1]} {r[2]} {r[3] or ''}".lower()
+        plan_tokens = set(t for t in re.split(r"[\s,._\-/]+", plan_text) if len(t) > 2)
+        matched = len(plan_tokens & set(tokens))
+        total = max(len(tokens), 1)
+        score = matched / total
+        results.append({
             "id": r[0], "name": r[1], "label": r[2], "description": r[3] or "",
             "intent_patterns": r[4] or [], "lifecycle_stages": r[5] or [],
-            "domains": r[6] or [], "requires_dataset": r[7], "score": 1.0,
-        }
-        for r in rows
-    ]
+            "domains": r[6] or [], "requires_dataset": r[7], "score": max(score, 0.1),
+        })
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -944,8 +1008,10 @@ def _call_llm(api_key: str, messages: list[dict]) -> Optional[dict]:
 def _pattern_match(
     conn,
     intent_context: dict,
+    app_id: str = "base",
+    solution_id: Optional[str] = None,
 ) -> Optional[dict]:
-    """Pattern matching: check intent_patterns arrays for direct match."""
+    """Pattern matching: exact first, then semantic over plan_pattern_embeddings."""
     matched = intent_context.get("matched_node")
     if not matched:
         return None
@@ -953,35 +1019,95 @@ def _pattern_match(
     if not intent_name:
         return None
 
+    # Step 1: Exact match (fast path, kept)
+    sol_clause = ""
+    params: list = [intent_name, app_id]
+    if solution_id:
+        sol_clause = "AND (solution_id = %s OR solution_id IS NULL)"
+        params.append(solution_id)
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT name FROM execution_plans
             WHERE %s = ANY(intent_patterns)
+            AND (app_id = %s OR app_id = 'base')
+            {sol_clause}
             LIMIT 1
             """,
-            (intent_name,),
+            params,
         )
         row = cur.fetchone()
-    if row is None:
-        return None
-    plan = get_execution_plan(conn, row[0])
-    if plan is None:
-        return None
-    return {
-        "plan": plan,
-        "confidence": 0.80,
-        "reasoning": f"Direct pattern match: intent '{intent_name}' found in plan '{plan['name']}' intent_patterns",
-        "overrides": None,
-        "warnings": [],
-        "method": "pattern_match",
-    }
+    if row is not None:
+        plan = get_execution_plan(conn, row[0])
+        if plan is not None:
+            return {
+                "plan": plan,
+                "confidence": 0.85,
+                "reasoning": f"Exact pattern match: intent '{intent_name}' found in plan '{plan['name']}' intent_patterns",
+                "overrides": None,
+                "warnings": [],
+                "method": "pattern_match",
+            }
+
+    # Step 2: Semantic pattern match (fuzzy)
+    try:
+        from hooks.embedding_registry import embed_texts, cosine_rank
+        import numpy as np
+
+        intent_label = matched.get("label", intent_name)
+        intent_desc = matched.get("description", "")
+        embed_text = f"{intent_label}. {intent_desc}" if intent_desc else intent_label
+        q_vec = embed_texts([embed_text])[0]
+
+        # Fetch plan_pattern_embeddings (app-scoped via JOIN)
+        sol_join = ""
+        join_params: list = [app_id]
+        if solution_id:
+            sol_join = "AND (ep.solution_id = %s OR ep.solution_id IS NULL)"
+            join_params.append(solution_id)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT ppe.plan_id, ppe.pattern_text, ppe.embedding, ep.name
+                FROM plan_pattern_embeddings ppe
+                JOIN execution_plans ep ON ppe.plan_id = ep.id
+                WHERE (ep.app_id = %s OR ep.app_id = 'base')
+                {sol_join}
+                """,
+                join_params,
+            )
+            pattern_rows = cur.fetchall()
+
+        if pattern_rows:
+            candidates = [(i, row[2]) for i, row in enumerate(pattern_rows)]
+            ranked = cosine_rank(q_vec, candidates)
+
+            if ranked and ranked[0][1] >= 0.70:
+                top_idx, top_score = ranked[0]
+                plan_name = pattern_rows[top_idx][3]
+                plan = get_execution_plan(conn, plan_name)
+                if plan is not None:
+                    return {
+                        "plan": plan,
+                        "confidence": round(min(top_score, 0.80), 2),
+                        "reasoning": f"Semantic pattern match: intent '{intent_name}' matched pattern '{pattern_rows[top_idx][1]}' in plan '{plan_name}' (score={top_score:.3f})",
+                        "overrides": None,
+                        "warnings": ["Matched by semantic pattern similarity — verify plan suitability"],
+                        "method": "pattern_match",
+                    }
+    except Exception:
+        pass
+
+    return None
 
 
 def _semantic_match(
     conn,
     intent_context: dict,
     dcp: dict,
+    app_id: str = "base",
+    solution_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Semantic similarity fallback over plan embeddings."""
     matched = intent_context.get("matched_node")
@@ -996,7 +1122,8 @@ def _semantic_match(
         return None
 
     domain = dcp.get("domain")
-    candidates = find_candidate_plans(conn, query, limit=3, domain_filter=domain)
+    candidates = find_candidate_plans(conn, query, limit=3, domain_filter=domain,
+                                      app_id=app_id, solution_id=solution_id)
     if not candidates or candidates[0]["score"] < 0.60:
         return None
 
@@ -1056,6 +1183,8 @@ def resolve_execution_plan(
     intent_context: dict,
     dcp: dict,
     api_key: Optional[str] = None,
+    app_id: str = "base",
+    solution_id: Optional[str] = None,
 ) -> dict:
     """Main reasoning engine: resolve an intent to an execution plan.
 
@@ -1064,6 +1193,11 @@ def resolve_execution_plan(
       2. Pattern matching (intent_patterns)
       3. Semantic similarity
       4. Fallback (no plan found)
+
+    Parameters
+    ----------
+    app_id      : Application scope — sees own plans + 'base' plans (default 'base')
+    solution_id : Solution scope (default None = app-wide)
 
     Returns:
         {
@@ -1084,7 +1218,7 @@ def resolve_execution_plan(
     # Step 1: LLM Reasoning
     if api_key:
         try:
-            cards = list_agent_cards(conn)
+            cards = list_agent_cards(conn, app_id=app_id)
             plans = list_execution_plans(conn)
             examples = get_execution_examples(conn, limit=10)
             messages = _build_llm_prompt(intent_context, dcp, cards, plans, examples)
@@ -1107,7 +1241,8 @@ def resolve_execution_plan(
 
     # Step 2: Pattern Matching
     try:
-        result = _pattern_match(conn, intent_context)
+        result = _pattern_match(conn, intent_context, app_id=app_id,
+                                solution_id=solution_id)
         if result:
             return result
     except Exception:
@@ -1115,7 +1250,8 @@ def resolve_execution_plan(
 
     # Step 3: Semantic Similarity
     try:
-        result = _semantic_match(conn, intent_context, dcp)
+        result = _semantic_match(conn, intent_context, dcp, app_id=app_id,
+                                 solution_id=solution_id)
         if result:
             return result
     except Exception:

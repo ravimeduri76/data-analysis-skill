@@ -135,7 +135,7 @@ def review_run(
 
 
 def _heuristic_review(run_meta: dict) -> dict:
-    """Keyword-based review fallback when Claude API is unavailable."""
+    """Keyword + semantic review fallback when Claude API is unavailable."""
     suggestions: dict = {
         "domain_assessment": {
             "was_correct": run_meta.get("domain_correct"),
@@ -148,10 +148,38 @@ def _heuristic_review(run_meta: dict) -> dict:
         "_review_method": "heuristic",
     }
 
+    # Semantic recall: check if similar past runs corrected their domain
+    try:
+        from hooks.semantic_store import recall_semantic
+        from hooks.db_store import get_connection
+
+        conn = get_connection()
+        if conn:
+            try:
+                query_text = " ".join(run_meta.get("column_names", []))
+                similar = recall_semantic(conn, query_text, limit=3)
+                for hit in similar:
+                    meta = hit.get("metadata", {})
+                    if meta.get("domain_corrected_to"):
+                        da = suggestions["domain_assessment"]
+                        if not da["suggested_domain"]:
+                            da["suggested_domain"] = meta["domain_corrected_to"]
+                        suggestions["skill_notes"].append(
+                            f"Similar past run corrected domain to '{meta['domain_corrected_to']}'"
+                        )
+                        break
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     col_text = " ".join(run_meta.get("column_names", [])).lower()
     issues   = run_meta.get("issues", [])
 
-    # -- MDM signal detection --
+    # -- MDM signal detection (token overlap scoring) --
     mdm_signals = [
         "cleansed", "mailing name", "golden record", "mdm id", "grm",
         "survivorship", "dedup", "master data", "baxter mdm",
@@ -159,6 +187,7 @@ def _heuristic_review(run_meta: dict) -> dict:
         "cleansed postal", "grm process state", "grm state",
     ]
     found_mdm = [s for s in mdm_signals if s in col_text]
+    mdm_confidence = len(found_mdm) / max(len(mdm_signals), 1)
     if found_mdm:
         da = suggestions["domain_assessment"]
         if not da["suggested_domain"]:

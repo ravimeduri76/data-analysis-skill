@@ -23,11 +23,15 @@ Edit that file to add or extend solution types without touching this code.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Optional
 
+import numpy as np
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 # Path to the auto-updated domain overrides file (written by self_improver.py)
 _OVERRIDES_PATH = os.path.join(
@@ -73,6 +77,18 @@ _DOMAIN_KEYWORDS: list[tuple[str, list[str]]] = [
         "drug", "molecule", "trial", "phase", "fda", "adverse", "efficacy", "dose",
         "formulation", "excipient", "bioavailability", "pharmacokinetics", "smiles",
         "compound", "assay", "indication", "contraindication", "generic", "brand",
+    ]),
+    ("Automotive Aftermarket / Heavy Truck", [
+        "pies", "aces", "autocare", "aftermarket", "oe part", "oem part",
+        "cross reference", "cross-reference", "xref", "interchange",
+        "heavy duty", "heavy-duty", "truck parts", "truck-lite", "tectran",
+        "bendix", "meritor", "eaton", "atro", "dorman", "gates", "dayco",
+        "fleetpride", "finditparts", "truckpro", "napa", "o'reilly",
+        "part number", "vendor part", "sku", "upc", "gtin", "ean",
+        "category l1", "category l2", "category l3",
+        "brake", "air dryer", "lighting", "suspension", "exhaust",
+        "transmission", "clutch", "wheel seal", "hub", "drum", "rotor",
+        "air line", "gladhand", "air fitting", "valve", "compressor",
     ]),
     ("Mechanical Components", [
         "fastener", "bolt", "screw", "nut", "washer", "rivet", "pin", "anchor",
@@ -162,6 +178,12 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "analysis_lens": "Focus on compound efficacy signals, adverse event frequencies, trial phase outcomes, and regulatory compliance data quality.",
         "anomaly_guidance": "Flag impossible dose values, adverse event severity mismatches, trial protocol deviations, and molecular property outliers.",
         "key_metrics": ["efficacy rate", "adverse event incidence", "trial dropout rate", "bioavailability", "IC50"],
+    },
+    "Automotive Aftermarket / Heavy Truck": {
+        "role": "automotive aftermarket product data analyst with expertise in PIES/ACES standards, heavy-duty truck parts cataloging, and OEM cross-referencing",
+        "analysis_lens": "Focus on PIES category completeness (L1/L2/L3), cross-reference coverage, brand distribution, physical dimension availability (part and package), attribute standardization, and OE-to-aftermarket interchange accuracy.",
+        "anomaly_guidance": "Flag SKUs missing PIES category at any level, duplicate part numbers across brands, cross-references pointing to discontinued parts, missing or zero physical dimensions for shippable items, description inconsistencies vs category assignment, and UPC/GTIN format violations.",
+        "key_metrics": ["PIES category completeness %", "cross-reference coverage %", "physical dimension fill rate %", "brand concentration (HHI)", "attribute completeness by category", "duplicate part rate"],
     },
     "Mechanical Components": {
         "role": "mechanical engineering data analyst specialising in fastener specifications, material grades, and joining technology",
@@ -341,7 +363,12 @@ def _detect_lifecycle_stage(user_query: str, sol: dict | None = None) -> str:
     if sol and sol.get("lifecycle_stage"):
         return sol["lifecycle_stage"]
 
-    # 2. Score query against keywords
+    # 2. Semantic lifecycle detection
+    semantic_stage = _semantic_lifecycle(user_query)
+    if semantic_stage:
+        return semantic_stage
+
+    # 3. Score query against keywords (fallback)
     if user_query:
         q = user_query.lower()
         scores: dict[str, int] = {
@@ -352,7 +379,7 @@ def _detect_lifecycle_stage(user_query: str, sol: dict | None = None) -> str:
         if scores[best] > 0:
             return best
 
-    # 3. Default
+    # 4. Default
     return "analytics"
 
 
@@ -369,6 +396,251 @@ def _col_signature(df: pd.DataFrame, max_sample_rows: int = 5) -> str:
             if trimmed:
                 lines.append("  " + str(trimmed)[:200])
     return "\n".join(lines)
+
+
+def _get_domain_conn_safe():
+    """Return DB connection or None (no crash if DB down)."""
+    try:
+        import psycopg2
+        env_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "Data_Analysis", ".env",
+        )
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip(), v.strip())
+        url = os.environ.get(
+            "DOMAIN_DB_URL",
+            "postgresql://postgres:memorystorepg@localhost:5432/domain",
+        )
+        return psycopg2.connect(url)
+    except Exception:
+        return None
+
+
+def _semantic_domain(df: pd.DataFrame) -> Optional[str]:
+    """Embedding-based domain detection. Returns domain name or None."""
+    try:
+        from hooks.embedding_registry import embed_texts, cosine_rank
+    except Exception:
+        return None
+
+    conn = _get_domain_conn_safe()
+    if conn is None:
+        return None
+
+    try:
+        sig = _col_signature(df)
+        q_vec = embed_texts([sig])[0]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT domain_name, embedding FROM domain_keyword_embeddings WHERE category = 'domain'"
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        candidates = [(i, row[1]) for i, row in enumerate(rows)]
+        ranked = cosine_rank(q_vec, candidates)
+        if not ranked:
+            return None
+
+        top_idx, top_score = ranked[0]
+        if top_score < 0.40:
+            return None
+
+        top_domain = rows[top_idx][0]
+
+        # Ambiguity tie-breaker: apply domain-knowledge precedence rules
+        if len(ranked) >= 2:
+            second_idx, second_score = ranked[1]
+            if top_score - second_score < 0.08:
+                second_domain = rows[second_idx][0]
+                # Apply same precedence as _heuristic_domain
+                if top_domain == "Healthcare" and second_domain == "Healthcare Revenue Cycle Management":
+                    return second_domain
+                if top_domain == "Healthcare" and second_domain == "Healthcare Supply Chain / GPO":
+                    return second_domain
+                if top_domain == "Healthcare" and second_domain == "Wellness":
+                    return second_domain
+                if top_domain == "Electrical Components" and second_domain == "Mechanical Components":
+                    return second_domain
+                if top_domain == "Industrial Equipment" and second_domain == "Electrical Components":
+                    return second_domain
+
+        return top_domain
+    except Exception as exc:
+        log.debug("Semantic domain detection failed: %s", exc)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _semantic_solution(
+    df: pd.DataFrame, domain: str, user_query: str = "",
+) -> Optional[dict]:
+    """Embedding-based solution matching. Returns solution dict or None."""
+    try:
+        from hooks.embedding_registry import embed_texts, cosine_rank
+    except Exception:
+        return None
+
+    conn = _get_domain_conn_safe()
+    if conn is None:
+        return None
+
+    try:
+        cols = ", ".join(df.columns.tolist()[:30])
+        embed_text = f"{user_query}. Domain: {domain}. Columns: {cols}"
+        q_vec = embed_texts([embed_text])[0]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT domain_name, embed_text, embedding FROM domain_keyword_embeddings WHERE category = 'solution'"
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        candidates = [(i, row[2]) for i, row in enumerate(rows)]
+        ranked = cosine_rank(q_vec, candidates)
+        if not ranked:
+            return None
+
+        top_idx, top_score = ranked[0]
+        if top_score < 0.45:
+            return None
+
+        # Parse key from domain_name: "domain::solution_name"
+        key = rows[top_idx][0]
+        parts = key.split("::", 1)
+        if len(parts) != 2:
+            return None
+
+        sol_domain, sol_name = parts
+        # Look up in solutions registry
+        registry = _load_solutions()
+        for sol in registry.get(sol_domain, []):
+            if isinstance(sol, dict) and sol.get("name") == sol_name:
+                return sol
+
+        return None
+    except Exception as exc:
+        log.debug("Semantic solution matching failed: %s", exc)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _semantic_lifecycle(user_query: str) -> Optional[str]:
+    """Embedding-based lifecycle stage detection. Returns stage name or None."""
+    if not user_query:
+        return None
+    try:
+        from hooks.embedding_registry import embed_texts, cosine_rank
+    except Exception:
+        return None
+
+    conn = _get_domain_conn_safe()
+    if conn is None:
+        return None
+
+    try:
+        q_vec = embed_texts([user_query])[0]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT domain_name, embedding FROM domain_keyword_embeddings WHERE category = 'lifecycle'"
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        candidates = [(i, row[1]) for i, row in enumerate(rows)]
+        ranked = cosine_rank(q_vec, candidates)
+        if not ranked:
+            return None
+
+        top_idx, top_score = ranked[0]
+        if top_score < 0.45:
+            return None
+
+        return rows[top_idx][0]
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _semantic_resolve_solution_by_name(domain: str, name_raw: str) -> Optional[dict]:
+    """Embedding-based solution name matching. Returns solution dict or None."""
+    if not name_raw:
+        return None
+    try:
+        from hooks.embedding_registry import embed_texts, cosine_rank
+    except Exception:
+        return None
+
+    conn = _get_domain_conn_safe()
+    if conn is None:
+        return None
+
+    try:
+        q_vec = embed_texts([name_raw])[0]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT domain_name, embedding FROM domain_keyword_embeddings WHERE category = 'solution'"
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            return None
+
+        candidates = [(i, row[1]) for i, row in enumerate(rows)]
+        ranked = cosine_rank(q_vec, candidates)
+        if not ranked:
+            return None
+
+        top_idx, top_score = ranked[0]
+        if top_score < 0.60:
+            return None
+
+        key = rows[top_idx][0]
+        parts = key.split("::", 1)
+        if len(parts) != 2:
+            return None
+
+        sol_domain, sol_name = parts
+        registry = _load_solutions()
+        for sol in registry.get(sol_domain, []):
+            if isinstance(sol, dict) and sol.get("name") == sol_name:
+                return sol
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _heuristic_domain(df: pd.DataFrame) -> str:
@@ -475,14 +747,21 @@ def _generic_solution(domain: str) -> dict:
 def _resolve_solution_by_name(domain: str, name_raw: str) -> Optional[dict]:
     """Find a solution entry by fuzzy name match within a domain (and across all domains).
 
+    Tries semantic matching first, falls back to bidirectional substring.
     Returns None if no match found.
     """
     if not name_raw:
         return None
+
+    # Semantic match first
+    semantic = _semantic_resolve_solution_by_name(domain, name_raw)
+    if semantic:
+        return semantic
+
+    # Keyword fallback: bidirectional substring
     registry = _load_solutions()
     name_lower = name_raw.lower()
 
-    # Try domain-local match first, then global
     candidates = registry.get(domain, []) + [
         s for d, sols in registry.items() if d != domain for s in sols
     ]
@@ -649,20 +928,22 @@ def detect_domain(
         except Exception:
             pass  # Fall through to heuristic
 
-    # Heuristic fallback
-    domain = _heuristic_domain(df)
+    # Semantic + heuristic fallback
+    semantic_domain = _semantic_domain(df)
+    domain = semantic_domain or _heuristic_domain(df)
+    method = "semantic" if semantic_domain else "heuristic"
     profile = _get_domain_profiles().get(domain, _DOMAIN_PROFILES["General"])
-    sol = _heuristic_solution(df, domain, user_query)
+    sol = _semantic_solution(df, domain, user_query) or _heuristic_solution(df, domain, user_query)
     tools = sol.get("typical_tools") or sol.get("typical_models") or []
     return {
         "domain":               domain,
         "confidence":           "medium",
         "role":                 profile["role"],
-        "summary":              f"Heuristic detection identified this as a {domain} dataset based on column names and sample values.",
+        "summary":              f"{'Semantic' if method == 'semantic' else 'Heuristic'} detection identified this as a {domain} dataset based on column names and sample values.",
         "analysis_lens":        profile["analysis_lens"],
         "anomaly_guidance":     profile["anomaly_guidance"],
         "key_metrics":          profile["key_metrics"],
-        "method":               "heuristic",
+        "method":               method,
         "solution_name":        sol.get("name", "Exploratory Data Analysis"),
         "solution_description": sol.get("description", ""),
         "lifecycle_stage":      _detect_lifecycle_stage(user_query, sol),

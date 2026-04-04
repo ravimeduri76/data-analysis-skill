@@ -32,16 +32,16 @@ Public API
 ----------
 get_intent_conn()                                          -> connection
 init_intent_db(conn)                                       -> None
-upsert_intent_node(conn, name, label, description,
-                   level, domain, lifecycle_stage)         -> int   (node id)
+upsert_intent_node(conn, ..., app_id, solution_id)        -> int   (node id)
 add_intent_triplet(conn, subject_name, predicate,
                    object_name, weight)                    -> int   (triplet id)
 add_intent_alias(conn, intent_name, alias, alias_type)     -> None
 embed_intent_nodes(conn)                                   -> int   (count embedded)
-find_candidate_intents(conn, query, limit, domain_filter)  -> list[dict]
+find_candidate_intents(conn, query, limit, domain_filter,
+                       app_id)                             -> list[dict]
 traverse_up(conn, node_id, max_depth)                      -> list[dict]
 traverse_down(conn, node_id, max_depth)                    -> list[dict]
-resolve_intent(conn, query, domain)                        -> dict  (IntentContext)
+resolve_intent(conn, query, domain, app_id)                -> dict  (IntentContext)
 render_intent_context(ctx)                                 -> str   (ASCII-safe)
 backfill_intent_embeddings(conn)                           -> int
 
@@ -149,22 +149,34 @@ def upsert_intent_node(
     level: str,
     domain: str,
     lifecycle_stage: Optional[str] = None,
+    app_id: str = "base",
+    solution_id: Optional[str] = None,
 ) -> int:
-    """Insert or update an intent node. Returns the node id."""
+    """Insert or update an intent node. Returns the node id.
+
+    Parameters
+    ----------
+    app_id      : Application scope (default 'base')
+    solution_id : Solution scope within the app (default None = app-wide)
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO intent_nodes (name, label, description, level, domain, lifecycle_stage)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO intent_nodes (name, label, description, level, domain,
+                                      lifecycle_stage, app_id, solution_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (name) DO UPDATE
               SET label           = EXCLUDED.label,
                   description     = EXCLUDED.description,
                   level           = EXCLUDED.level,
                   domain          = EXCLUDED.domain,
-                  lifecycle_stage = EXCLUDED.lifecycle_stage
+                  lifecycle_stage = EXCLUDED.lifecycle_stage,
+                  app_id          = EXCLUDED.app_id,
+                  solution_id     = EXCLUDED.solution_id
             RETURNING id
             """,
-            (name, label, description, level, domain, lifecycle_stage),
+            (name, label, description, level, domain, lifecycle_stage,
+             app_id, solution_id),
         )
         return cur.fetchone()[0]
 
@@ -314,44 +326,61 @@ def find_candidate_intents(
     query: str,
     limit: int = 8,
     domain_filter: Optional[str] = None,
+    app_id: str = "base",
 ) -> list[dict]:
     """Embed query and return top-k intent nodes ranked by cosine similarity.
 
     Falls back to alias keyword search if BGE-M3 is unavailable.
+
+    Parameters
+    ----------
+    app_id : Application scope — sees own data + 'base' data (default 'base')
 
     Returns list of dicts: {id, name, label, description, level, domain,
                              lifecycle_stage, score}
     """
     model = _get_embed_model()
     if model is None:
-        return _alias_keyword_search(conn, query, limit, domain_filter)
+        return _alias_keyword_search(conn, query, limit, domain_filter, app_id)
 
     try:
         import numpy as np
     except ImportError:
-        return _alias_keyword_search(conn, query, limit, domain_filter)
+        return _alias_keyword_search(conn, query, limit, domain_filter, app_id)
 
     q_vec = model.encode([query], normalize_embeddings=True)[0]
 
-    domain_clause = ""
-    params: list = []
+    # App-scoped: own + base data
+    conditions = ["(app_id = %s OR app_id = 'base')"]
+    params: list = [app_id]
     if domain_filter and domain_filter.lower() != "any":
-        domain_clause = "WHERE (domain = %s OR domain = 'any')"
-        params.append(domain_filter)
+        # Include the requested domain + all domains declared by the app manifest
+        domain_set = {domain_filter}
+        if app_id != "base":
+            try:
+                from app_registry import load_app_manifest
+                app_manifest = load_app_manifest(app_id)
+                domain_set.update(app_manifest.get("domains", []))
+            except (ImportError, FileNotFoundError):
+                pass
+        domain_placeholders = ", ".join(["%s"] * len(domain_set))
+        conditions.append(f"(domain IN ({domain_placeholders}) OR domain = 'any')")
+        params.extend(sorted(domain_set))
+    where = "WHERE " + " AND ".join(conditions)
 
     with conn.cursor() as cur:
         cur.execute(
             f"""
             SELECT id, name, label, description, level, domain, lifecycle_stage, embedding
             FROM intent_nodes
-            {domain_clause}
+            {where}
             """,
             params,
         )
         rows = cur.fetchall()
 
     if not rows:
-        return _alias_keyword_search(conn, query, limit, domain_filter)
+        return _alias_keyword_search(conn, query, limit, domain_filter, app_id)
 
     results = []
     for row in rows:
@@ -403,14 +432,16 @@ def _alias_keyword_search(
     query: str,
     limit: int,
     domain_filter: Optional[str],
+    app_id: str = "base",
 ) -> list[dict]:
     """Keyword fallback: search node names, labels, and aliases."""
     tokens = [t.lower() for t in query.split() if len(t) > 2]
     if not tokens:
         return []
 
+    app_clause = "AND (n.app_id = %s OR n.app_id = 'base')"
     domain_clause = ""
-    base_params: list = []
+    base_params: list = [app_id]
     if domain_filter and domain_filter.lower() != "any":
         domain_clause = "AND (n.domain = %s OR n.domain = 'any')"
         base_params.append(domain_filter)
@@ -426,21 +457,26 @@ def _alias_keyword_search(
             SELECT DISTINCT n.id, n.name, n.label, n.description,
                             n.level, n.domain, n.lifecycle_stage
             FROM intent_nodes n
-            WHERE ({like_clauses}) {domain_clause}
+            WHERE ({like_clauses}) {app_clause} {domain_clause}
             UNION
             SELECT DISTINCT n.id, n.name, n.label, n.description,
                             n.level, n.domain, n.lifecycle_stage
             FROM intent_nodes n
             JOIN intent_aliases a ON a.intent_id = n.id
-            WHERE ({" OR ".join(["a.alias LIKE %s"] * len(tokens))}) {domain_clause}
+            WHERE ({" OR ".join(["a.alias LIKE %s"] * len(tokens))}) {app_clause} {domain_clause}
             LIMIT %s
             """,
             like_params + base_params + [f"%{t}%" for t in tokens] + base_params + [limit],
         )
         rows = cur.fetchall()
 
-    return [
-        {
+    # Score by token overlap ratio instead of flat 1.0
+    results = []
+    for r in rows:
+        node_text = f"{r[1]} {r[2]} {r[3] or ''}".lower()
+        matched = sum(1 for t in tokens if t in node_text)
+        score = matched / max(len(tokens), 1)
+        results.append({
             "id":              r[0],
             "name":            r[1],
             "label":           r[2],
@@ -448,10 +484,10 @@ def _alias_keyword_search(
             "level":           r[4],
             "domain":          r[5],
             "lifecycle_stage": r[6] or "",
-            "score":           1.0,
-        }
-        for r in rows
-    ]
+            "score":           max(score, 0.1),
+        })
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +711,7 @@ def resolve_intent(
     conn,
     query: str,
     domain: Optional[str] = None,
+    app_id: str = "base",
 ) -> dict:
     """Full intent resolution pipeline.
 
@@ -728,7 +765,8 @@ def resolve_intent(
     }
 
     try:
-        candidates = find_candidate_intents(conn, query, limit=12, domain_filter=domain)
+        candidates = find_candidate_intents(conn, query, limit=12, domain_filter=domain,
+                                            app_id=app_id)
     except Exception:
         return empty
 
