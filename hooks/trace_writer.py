@@ -58,6 +58,14 @@ class AnalysisTrace:
         self._artifacts: list = []
         self._insights: list = []
         self._manifest_files: list = []
+        self.metrics: dict = {
+            "coverage_score": 0.0,
+            "confidence_score": 0.0,
+            "agents_run": 0,
+            "agents_failed": 0,
+            "degradations": 0,
+            "execution_time_sec": 0.0,
+        }
 
     # ── logging ───────────────────────────────────────────────────────────────
 
@@ -126,6 +134,7 @@ class AnalysisTrace:
             "file_sha256": self.file_sha256,
             "query": self.query,
             "domain": self.domain_ctx.get("domain", "Unknown"),
+            "metrics": self.metrics,
             "steps": self._steps,
             "artifacts": self._artifacts,
             "insights": self._insights,

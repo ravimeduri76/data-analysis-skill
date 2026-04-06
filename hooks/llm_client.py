@@ -18,6 +18,9 @@ _GROQ_MODEL = "llama-3.3-70b-versatile"
 # Anthropic fallback
 _ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
+# Degradation tracking — set by call_llm, read by orchestrator
+last_fallback_used: Optional[str] = None  # 'anthropic' | 'none_available' | None
+
 
 def call_llm(
     prompt: str,
@@ -48,6 +51,9 @@ def call_llm(
     str | None
         The model's text reply, or None on failure / no key available.
     """
+    global last_fallback_used
+    last_fallback_used = None
+
     groq_key = os.environ.get("GROQ_API_KEY", "").strip()
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
@@ -77,6 +83,7 @@ def call_llm(
             return None
         except Exception as exc:
             log.warning("Groq call failed (%s), trying Anthropic fallback", exc)
+            last_fallback_used = "anthropic"
 
     # ── Anthropic fallback ────────────────────────────────────────────────
     if anthropic_key:
@@ -101,4 +108,5 @@ def call_llm(
             log.warning("Anthropic call failed: %s", exc)
 
     log.info("No LLM API key available (GROQ_API_KEY / ANTHROPIC_API_KEY)")
+    last_fallback_used = "none_available"
     return None

@@ -65,11 +65,21 @@ _DEFAULT_URL = "postgresql://postgres:memorystorepg@localhost:5432/domain"
 
 
 def get_domain_conn():
-    """Return a psycopg2 connection to the domain knowledge graph database."""
+    """Return a psycopg2 connection to the domain knowledge graph database.
+
+    Raises psycopg2.OperationalError on connection failure (logged as warning).
+    """
     _load_env()
     url = os.environ.get("DOMAIN_DB_URL", _DEFAULT_URL)
     import psycopg2
-    return psycopg2.connect(url)
+    try:
+        return psycopg2.connect(url)
+    except psycopg2.OperationalError as exc:
+        log.warning(
+            "Domain graph DB connection failed (graph_available will be false): %s",
+            exc,
+        )
+        raise
 
 
 # ── schema ────────────────────────────────────────────────────────────────────

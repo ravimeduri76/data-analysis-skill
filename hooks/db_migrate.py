@@ -97,6 +97,19 @@ CREATE TABLE IF NOT EXISTS plan_pattern_embeddings (
     embedding    FLOAT4[] NOT NULL,
     UNIQUE (plan_id, pattern_text)
 );
+
+-- workflow checkpoints (for DESO state durability / resume)
+CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+    id           SERIAL PRIMARY KEY,
+    run_id       VARCHAR(100) NOT NULL,
+    step_name    VARCHAR(100) NOT NULL,
+    step_index   INT NOT NULL,
+    status       VARCHAR(20) NOT NULL,
+    context_json JSONB,
+    created_at   TIMESTAMP DEFAULT NOW(),
+    UNIQUE (run_id, step_name)
+);
+CREATE INDEX IF NOT EXISTS idx_wf_checkpoints_run ON workflow_checkpoints (run_id);
 """
 
 

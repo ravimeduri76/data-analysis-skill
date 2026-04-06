@@ -932,10 +932,11 @@ def detect_domain(
     semantic_domain = _semantic_domain(df)
     domain = semantic_domain or _heuristic_domain(df)
     method = "semantic" if semantic_domain else "heuristic"
+    degradation = None if semantic_domain else "semantic_unavailable"
     profile = _get_domain_profiles().get(domain, _DOMAIN_PROFILES["General"])
     sol = _semantic_solution(df, domain, user_query) or _heuristic_solution(df, domain, user_query)
     tools = sol.get("typical_tools") or sol.get("typical_models") or []
-    return {
+    result = {
         "domain":               domain,
         "confidence":           "medium",
         "role":                 profile["role"],
@@ -950,6 +951,9 @@ def detect_domain(
         "typical_tools":        tools,
         "key_outputs":          sol.get("key_outputs", []),
     }
+    if degradation:
+        result["degradation"] = degradation
+    return result
 
 
 def domain_role_prefix(domain_ctx: dict) -> str:
