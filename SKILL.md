@@ -5,6 +5,11 @@ description: Use this skill when the user asks to analyse a dataset or file, e.g
 
 Perform end-to-end data analysis on the tabular dataset provided by the user.
 
+> **Mandatory:** All analysis steps operate under the Core Operating Principles
+> in `C:\Users\Ravi\.claude\CORE.md`. Key for this skill: P0 (truth over convenience),
+> P1 (flag PII/sensitive data before processing), P3 (structured reasoning in every insight),
+> P8 (ground in prior runs via memory hooks).
+
 ---
 
 ## How to invoke this skill
@@ -37,6 +42,8 @@ If `dataset_path` is not obvious, ask: *"Which file should I analyse?"*
 **If the intent is anomaly or outlier detection** → use Workflow C below (can run standalone or after Workflow A Steps 1–4b).
 
 **If the intent is survival or churn analysis** → use Workflow D below. Trigger phrases: "survival", "churn", "time-to-event", "Kaplan-Meier", "Cox model", "hazard ratio", "when will X fail/churn/lapse".
+
+**If the intent is ML experimentation or prediction** → use Workflow E below. Trigger phrases: "train a model", "predict", "experiment", "ML", "classification", "regression", "automl", "leaderboard". Workflow E also runs automatically as Phase 3b in `kaggle_daily.py`.
 
 ---
 
@@ -125,12 +132,11 @@ print(df.dtypes.to_string())
 ```
 
 **Notes:**
-- Excel files (`.xlsx`, `.xls`): requires `openpyxl` — install with `pip install openpyxl` if missing.
-- ODS files: requires `odfpy` — install with `pip install odfpy` if missing.
+- loader.py auto-installs whitelisted dependencies (openpyxl, odfpy, xlrd, etc.) — no manual `pip install` needed.
+- If auto-install is disabled in `loader_config.json`, the error message tells you exactly what to install.
 - The loader automatically skips blank leading rows and drops unnamed all-null padding columns common in Excel exports.
 
-If loading fails with an `ImportError`, install the dependency shown in the error and retry.
-If loading fails for any other reason, report the error and stop.
+If loading fails for any reason other than a whitelisted dependency, report the error and stop.
 
 ---
 
@@ -1641,6 +1647,224 @@ print(improvement_report(result))
 
 ---
 
+## Workflow E -- ML Research Orchestrator (4-phase)
+
+Use this workflow when the user asks to "train a model", "predict", "experiment", "run ML", "research", or after Workflow A profiling when the dataset has a suitable prediction target.
+
+**Trigger phrases:** "train a model", "predict", "experiment", "ML", "classification", "regression", "automl", "leaderboard", "research project"
+
+The Research Orchestrator wraps the existing experiment loop with structured methodology:
+**Understand -> Design (creative DoE) -> Prioritize -> Execute in loop**
+
+It explores 7 research surfaces: Data, Features, Architectures, Models, Parameters, Validation, Interpretation.
+
+### Step E0 -- Memory check (hook -- run if POSTGRES_URL is set)
+
+Same as Step 0. Retrieve relevant prior ML runs.
+
+```python
+# Same pattern as Workflow A Step 0
+# Use recall_semantic(conn, query="ml experiment " + dataset_name, limit=5)
+```
+
+### Step E1 -- Phase 1: Understand (load, profile, select target, frame objective)
+
+If Workflow A has already run, reuse `df`, `col_classes`, `domain_ctx` from that output.
+Otherwise, run Steps 1-1b from Workflow A.
+
+```python
+import sys, os; sys.path.insert(0, r"C:\Users\Ravi\research\data-analysis")
+from hooks.ml_experiment import select_target
+
+# Auto-detect or use user-specified target
+target_info = select_target(df, col_classes, domain_ctx)
+if target_info is None:
+    print("No suitable prediction target found. Skipping ML workflow.")
+else:
+    print(f"Target: {target_info['col']} ({target_info['task_type']})")
+    print(f"Rationale: {target_info['rationale']}")
+```
+
+### Step E2 -- Baseline run (5-model roster via `run_experiment_loop(n_rounds=0)`)
+
+```python
+from hooks.ml_experiment import build_feature_matrix, run_experiment_loop
+
+id_cols = col_classes.get("identifiers", [])
+X, y, feature_names = build_feature_matrix(df, target_info["col"], id_cols)
+
+baseline_result = run_experiment_loop(
+    X, y, feature_names,
+    task_type=target_info["task_type"],
+    max_trials=8,
+    domain_ctx=domain_ctx,
+    out_dir=out_dir,
+    n_rounds=0,  # Pure roster, no LLM rounds
+)
+print(f"Baseline: {baseline_result['best_trial']['metrics']['Model']} "
+      f"({baseline_result['primary_metric']}={baseline_result['incumbent_metric']:.4f})")
+```
+
+### Step E3 -- Phase 2: Design experiments across 7 surfaces
+
+```python
+from hooks.research_orchestrator import phase2_design
+
+# LLM designs 8-15 creative experiments if API key available
+# Heuristic fallback: template instantiation from surface definitions
+experiments = phase2_design(
+    project, baseline_result, quality_df, importances,
+    anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+)
+```
+
+**7 Research Surfaces:**
+| Surface | Vectors |
+|---------|---------|
+| Data | quality fixes (imputation), quantity augmentation (SMOTE, noise) |
+| Features | explicit (ratios, interactions), latent (PCA, clusters), engineering (log, bin) |
+| Architectures | ensemble (voting, stacking), mixture of experts |
+| Models | CatBoost, ExtraTrees, GradientBoosting, SVM, KNN |
+| Parameters | Optuna Bayesian optimization, targeted grid search |
+| Validation | K-fold CV, bootstrap CI, overfitting detection |
+| Interpretation | SHAP, permutation importance, threshold analysis |
+
+### Step E4 -- Phase 3: Prioritize with stopping threshold
+
+```python
+from hooks.research_orchestrator import phase3_prioritize, compute_stopping_threshold
+
+# Compute stopping threshold (60% LLM reasoning + 40% heuristic)
+threshold, rationale = compute_stopping_threshold(
+    baseline_metrics, task_type, domain_ctx, primary_metric,
+    api_key=os.environ.get("ANTHROPIC_API_KEY"),
+)
+
+# Prioritize: score = (impact + diversity_bonus + gap_bonus) / cost
+experiments = phase3_prioritize(experiments, project)
+```
+
+### Step E5 -- Phase 4: Execute loop until threshold/budget/plateau
+
+```python
+from hooks.research_orchestrator import phase4_execute
+
+exec_result = phase4_execute(
+    project, X, y, feature_names, experiments,
+    X_train, X_test, y_train, y_test,
+    out_dir, anthropic_api_key,
+)
+```
+
+**Stopping criteria (any triggers stop):**
+1. `current_best >= stopping_threshold` -> "threshold_met"
+2. Budget exhausted (trials, seconds) -> "budget_exhausted"
+3. Last 3 iterations each improved < 0.005 -> "plateau_detected"
+4. All planned experiments done -> "all_experiments_done"
+
+The loop repeats Phase 2-4 for up to `max_iterations`, adapting the threshold each iteration.
+
+### Step E6 -- Render + save artifacts
+
+```python
+from hooks.research_orchestrator import update_research_project_md, render_research_summary
+from hooks.ml_experiment import render_experiment_summary, append_results_tsv
+
+# Living research artifact
+md_path = update_research_project_md(project, out_dir)
+
+# Standard experiment summary
+summary = render_experiment_summary(result)
+research_summary = render_research_summary(project)
+print(research_summary)
+
+# Write TSV
+tsv_path = append_results_tsv(
+    result["trials"], out_dir / "experiments.tsv",
+    dataset_name=dataset_name, domain=domain_ctx["domain"],
+    target_col=target_info["col"],
+)
+```
+
+### Step E7 -- Persist to DB (hook -- run if POSTGRES_URL is set)
+
+```python
+from hooks.db_store import get_connection, init_db, save_run
+
+conn = get_connection(os.getenv("POSTGRES_URL"))
+init_db(conn)
+run_id = save_run(
+    conn=conn, trace=trace, domain_ctx=domain_ctx,
+    findings_summary=f"Research project: best={result['best_trial'].get('metrics', {}).get('Model', 'N/A')}, "
+                     f"{result['primary_metric']}={result['incumbent_metric']:.4f}, "
+                     f"stop={result.get('trace', {}).get('stop_reason', 'N/A')}",
+    analysis_type="ml_experiment",
+    workflows_run=["E"],
+    row_count=len(df), col_count=len(df.columns),
+)
+conn.close()
+```
+
+### Step E8 -- Self-improvement with research findings
+
+```python
+from hooks.self_improver import run_self_improvement, improvement_report
+
+run_meta = {
+    "dataset_path": dataset_path,
+    "query": f"ML research project on {dataset_name}",
+    "domain_detected": domain_ctx["domain"],
+    "analysis_type": "ml_experiment",
+    "workflows_run": ["E"],
+    "row_count": len(df),
+    "col_count": len(df.columns),
+    "findings_summary": f"Best: {result['best_trial'].get('metrics', {}).get('Model', 'N/A')} "
+                        f"({result['primary_metric']}={result['incumbent_metric']:.4f}). "
+                        f"{len(result['trials'])} trials across {result.get('trace', {}).get('total_experiments', '?')} experiments. "
+                        f"Stopped: {result.get('trace', {}).get('stop_reason', 'N/A')}.",
+}
+si_result = run_self_improvement(run_meta, anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"))
+print(improvement_report(si_result))
+```
+
+### Step E9 -- Present research project to user
+
+Show:
+1. The research project summary (surfaces explored, improvement trajectory)
+2. Best model name, primary metric, and key secondary metrics
+3. Stopping reason and threshold
+4. Number of experiments across each surface
+5. Path to `research_project.md` and `experiments.tsv`
+6. Any leakage warnings from feature matrix build
+
+**Simplified invocation (wraps all phases):**
+
+```python
+from hooks.research_orchestrator import run_research_project
+
+result = run_research_project(
+    df, col_classes, domain_ctx,
+    target_col=target_col,       # optional, auto-detected if None
+    objective=None,               # auto-framed from domain + target
+    max_iterations=5,             # max research iterations
+    budget_limit={"max_trials": 30, "max_seconds": 600},
+    out_dir=out_dir,
+    anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+)
+# result contains all run_experiment_loop keys (backward compat) plus:
+# - project: full ResearchProject state
+# - research_project_md_path: path to research_project.md
+# - research_summary: ASCII-safe summary text
+# - trace: {phases, iterations, stop_reason, total_experiments, total_trials, elapsed_s}
+```
+
+**Meta-agent integration:** For full meta-agent research with L3 experiment ledger, 4 sub-agents
+(RA1–RA4), DESO integration (AG40), and structured context packets, see
+`~/.claude/skills/research_orchestrator/SKILL.md`. The Research Orchestrator skill wraps this
+same workflow with additional memory persistence, surface registry, and routing from DESO SA3.
+
+---
+
 ## Learned Patterns
 
 Auto-updated by `hooks/self_improver.py` after each run. Do not edit manually.
@@ -1654,3 +1878,145 @@ Auto-updated by `hooks/self_improver.py` after each run. Do not edit manually.
 ### 2026-03-24
 - Asymmetric block comparison: when the two ranges have different column counts, compare semantic field pairs (e.g. Legal Name vs Mailing Name) rather than whole-block identity.
 - Null cleansed fields (Cleansed City, Cleansed Province, etc.) indicate the address standardisation pipeline has not yet written back results -- treat as pipeline-incomplete, not a data quality error in the source.
+
+### 2026-03-26 — Clinical Mortality Prediction (Elara Probus)
+
+**Dataset construction patterns:**
+- When building a mortality/event flag from a status-history table, filter on the MOST RECENT status per client (groupby ClientId + idxmax on date), not on any row where the status appears -- a client can have multiple discharged rows.
+- Sentinel dates (e.g. 2099-12-31 in diagnosis_end_date) must be converted to NaT before any duration arithmetic -- they will otherwise silently produce wildly large condition_period values that dominate the model.
+- One-to-many joins (e.g. client → diagnoses) expand row count -- always aggregate back to one-row-per-client (using groupby first/max/sum) before ML dataset construction.
+- When two form versions cover the same questions (e.g. FormID 38 Q_1641-1652 and FormID 142 Q_6339-6350), sum the paired columns and drop the originals -- treating them as separate features doubles cardinality and confuses tree models.
+- 76%+ null questionnaire columns mean "not assessed", not "no events" -- fill with 0 for ML but flag this as a potential bias source in the summary.
+- WeeklyAuthHrs: bucket to Low/Medium/High/Unknown (Q25/Q90 thresholds + Unknown for null) rather than imputing -- the Unknown category carries clinical meaning (unplanned or informal care).
+
+**ICD-10 extraction:**
+- Regex `^([A-Z]\d{2}[\d.A-Z]{0,7})` covers 94-95% of structured codes; remainder need lookup.
+- Multi-condition strings (3+ comma-separated diagnoses) cannot reliably map to a single ICD-10 code -- leave as null and flag count separately.
+- When Anthropic API credits are depleted mid-pipeline, fall back to a hardcoded ICD_MAP dict with expert codes for the unique free-text descriptions; 292 entries covered the full dataset.
+
+**Imbalanced classification (6% positive rate):**
+- class_weight='balanced' on LogisticRegression/RandomForest achieves high recall (0.96-0.99) but produces many false positives -- appropriate when the cost of missing a mortality case is high.
+- SMOTE (sampling_strategy=0.3) + RobustScaler improves MLP from near-zero recall to usable, but reduces recall for models that were already performing well with class weights.
+- For clinical mortality prediction, prefer class_weight='balanced' over SMOTE for tree/linear models; use SMOTE only for neural nets.
+- PR-AUC of 0.24-0.28 at 6% prevalence represents a ~4x lift over baseline (0.061) -- meaningful, but reaching 0.50 requires: (a) Charlson Comorbidity Index from ICD-10 codes, (b) ICD chapter interaction terms, (c) direct PR-AUC optimisation (XGBoost eval_metric='aucpr'), (d) isotonic calibration, (e) trend/slope features from timestamped assessments.
+
+**Recency features from timestamped assessments:**
+- Compute per-event-type "days_since_X" using ClientFormSubmittedDatetime grouped by ClientId; fill non-assessed clients with sentinel NEVER=9999.
+- Recency-weighted burden = q_score_total / (days_since_last_adverse_event/30 + 1) is more predictive than raw totals for clients with long care histories.
+- Rate features (events per 30 days) normalise for care duration and outperform raw counts for clients with very different tenure lengths.
+
+**Model comparison best practices:**
+- Always compare ROC-AUC, PR-AUC, F1+ (positive class), Recall, MCC, Specificity together -- no single metric tells the full story for imbalanced clinical data.
+- MCC is the most reliable single metric for imbalanced binary classification (accounts for all four confusion matrix cells).
+- For clinical use cases where missing a positive case is costly, rank models primarily by Recall, use Specificity as the secondary constraint.
+
+### 2026-03-27 — Readmission Risk Prediction (Elara Probus)
+
+**Label construction from multi-status event tables:**
+- When building a readmission/event flag from a status-history table, do NOT filter on a single CLIENTSTATUS value -- clients can have both `discharged` and `on_hold` events for the same hospitalisation episode. Query ALL relevant status values and union them.
+- For the Elara Probus dataset: `discharged` rows captured ~1,188 clients; adding `on_hold` rows captured an additional ~2,189 clients and tripled the positive rate from 4.2% to 14.2%.
+- Always audit ClientStatusReasonCode variants with `.value_counts()` before writing the filter -- reason codes are often free-text with inconsistent capitalisation (e.g. "Hospital - Hospital", "SNF - Skilled Nursing Facility").
+- Use case-insensitive substring matching: `str.contains('hospital|snf|nursing', case=False, na=False)`.
+
+**Temporal leakage detection and avoidance:**
+- **Diagnostic signal**: if PR-AUC = 1.0 across ALL models simultaneously, the dataset has a perfectly leaky feature -- this is not a coincidence.
+- **Leakage audit procedure**: for each event-derived feature, run `pd.crosstab(df[feature] > 0, df[target])`. If the cell `(feature>0, target=0)` is zero -- every client with a non-zero feature value is a positive -- the feature is perfectly leaky.
+- **Root cause**: features derived from the same events table that defines the label will encode label information. Examples: `days_since_last_hosp` (not 9999 ↔ flag=1), `total_hosp_events` (>0 ↔ flag=1).
+- **Fix**: exclude all full-history event features from training; retain them in the output file for downstream scoring but add them to `ALWAYS_EXCLUDE` in the AutoML script.
+- **Count feature correction**: when an event-count column (e.g. `rc_hospital`) is computed from all events including the qualifying event, subtract 1 from all values: `df['rc_hospital'] = (df['rc_hospital'] - 1).clip(lower=0)`. Verify the fix with a post-correction cross-tab.
+- **Structural leakage** (unavoidable in retrospective designs): after correction, clients with 2+ events will still have `prior_count > 0` AND `True_Readmission_Flag = 1` -- this is definitionally true, not a data error. The only fix is a prospective temporal train/test split.
+
+**Prior-event feature engineering (leakage-safe recency features):**
+- Identify clients with >1 qualifying event: `multi_ids = hosp[hosp.duplicated('ClientID', keep=False)]['ClientID'].unique()`
+- Sort events by date, then exclude the most recent event using `grp.iloc[:-1]` -- this ensures all features are computed from events that occurred *before* the most recent hospitalisation.
+- Fill single-event clients (no prior history) with sentinel values: `days_since_prior_hosp = 9999`, LOS features = 0.
+- Prior-event features are valid for the broad readmission flag (≥1 event) but structurally leaky for the strict flag (>1 events, True_Readmission_Flag) -- exclude them from the strict-flag model via a separate `extra_exclude` parameter.
+
+**Two-flag modeling strategy for readmission:**
+- **Broad flag** (≥1 qualifying event = 1): optimised for population-level screening; prior-event features are valid; higher positive rate (~14%) means more stable model estimates.
+- **Strict flag** (>1 qualifying events = 1): optimised for targeted intervention (clients who have already been readmitted); lower positive rate (~2.8%) requires excluding prior-event features to avoid structural leakage.
+- Implement separate `ALWAYS_EXCLUDE` and `PRIOR_FEATURES` sets; run two passes in the same AutoML script with `extra_exclude=None` (Pass 1) and `extra_exclude=PRIOR_FEATURES` (Pass 2).
+- Expected lift: broad flag ~6× (PR-AUC / prevalence), strict flag ~30× -- both are meaningful given clinical context.
+
+**Label expansion impact on model performance:**
+- Adding `on_hold` + Hospital/SNF events alongside `discharged` events: positive rate 4.2% → 14.2%, PR-AUC 0.308 → 0.841 -- single biggest model improvement in the project.
+- This pattern generalises: whenever PR-AUC is unexpectedly low, check whether the label definition is incomplete (missing status values, missing reason code variants).
+
+**AutoML script architecture for two-flag leakage-safe runs:**
+```python
+ALWAYS_EXCLUDE = {
+    "ClientId", "Readmission_Flag", "True_Readmission_Flag",
+    # Full-history leaky features (excluded from all runs):
+    "days_since_last_hosp", "last_hosp_los", "mean_hosp_los", "total_hosp_events",
+}
+PRIOR_FEATURES = {
+    "prior_hosp_count", "days_since_prior_hosp",
+    "prior_hosp_los", "mean_prior_hosp_los",
+}
+
+def run_pass(df, target, extra_exclude=None):
+    exclude = ALWAYS_EXCLUDE | {target} | (extra_exclude or set())
+    features = [c for c in df.columns if c not in exclude]
+    # ... train models ...
+
+# Pass 1: broad flag -- prior features included
+run_pass(df, target="Readmission_Flag", extra_exclude=None)
+
+# Pass 2: strict flag -- prior features excluded (structurally leaky)
+run_pass(df, target="True_Readmission_Flag", extra_exclude=PRIOR_FEATURES)
+```
+
+### 2026-03-31 — Healthcare Revenue Cycle Management (Invoice & Adjustment Analysis)
+
+**Domain detection:**
+- Billing/claims datasets with columns like `payorName`, `InvoiceAdjustmentType`, `ClaimBillStatus`, `invoiceServiceLine`, `adjustmentCategory` are **Healthcare Revenue Cycle Management**, NOT generic Healthcare. Generic Healthcare signals (patient, diagnosis, ICD, CPT) are absent; RCM signals are structural column names not free-text values.
+- Added "Healthcare Revenue Cycle Management" domain to `domain_detector.py` with dedicated keywords, profile, and ambiguity resolver (RCM beats Healthcare when RCM score >= Healthcare score).
+
+**Sparse-by-design columns — do not treat as data quality failures:**
+- In RCM billing datasets, adjustment columns (`InvoiceAdjustmentAmount`, `InvoiceAdjustmentType`, `InvoiceAdjustmentGroupDesc`, `adjustmentName`, `adjustmentCategory`) are structurally null on non-adjusted lines — 84% null is correct and expected, not a quality defect.
+- When `adjustmentCategory` has only 1 unique value (e.g. "ADJ"), this is also expected — it is a type discriminator populated only when an adjustment exists, not a meaningful categorical dimension.
+- Pattern: if a cluster of 4-5 related columns all have the same null% (e.g. all exactly 84.27%), they are a sparse attribute group — flag them together as "sparse by design" rather than individually as CRITICAL_NULLS.
+
+**RCM aggregation pattern — always compute these five dimensions:**
+1. By `payorName` — absolute write-off $ and adj % of billed (reveals concentration)
+2. By `payorTypeName` — adj rate % and adj % of billed (reveals structural contract issues)
+3. By `payorFequency` — PERDIEM vs FFS vs PDGM (PERDIEM almost always dominates RCM losses)
+4. By `InvoiceAdjustmentType` / `InvoiceAdjustmentGroupDesc` — controllable vs non-controllable split
+5. By `invoiceServiceLine` — Home Health vs Hospice vs Behavioral Health (Hospice typically concentrates risk)
+
+**Controllable vs non-controllable classification:**
+- `InvoiceAdjustmentGroupDesc` values containing "CONTROLLABLE" but not "NON" = controllable losses (process-fixable)
+- "REVENUE OFFSET" = structural contract adjustment (requires renegotiation, not process fix)
+- "NON-CONTROLLABLE" = external factors (e.g. Medicaid spenddown, sequestration)
+- Always compute and report the controllable $ total — it is the actionable budget for RCM improvement
+
+**Payment speed proxy when no AR timestamp exists:**
+- `(invoicepostDate - ServiceDate).dt.days` is the closest available proxy for billing velocity when actual cash receipt date is absent
+- Segment by `payorTypeName` and `has_adjustment` boolean to reveal that adjusted invoices post slower
+- Highlight payers with median > 50 days as AR risk; payers with median < 10 days as benchmarks
+
+**February spike pattern:**
+- In period-end reconciliation datasets, a single month may contain 70-80% of all adjustment activity (batch write-off runs). Always plot the monthly trend before drawing conclusions about steady-state adjustment rates.
+
+**What-if priorities for RCM datasets (added to `what_if.py`):**
+- ERA 835 / remittance advice — needed to compute true net collection rate
+- Denial timestamps (date denied / appealed / resolved) — needed for days-in-AR and appeal overturn rate
+- Prior authorization log — needed to root-cause ELIG/AUTH write-offs
+- Eligibility verification log — needed to distinguish payer data error from verification failure
+- Claim submission date — needed for true days-in-AR (vs invoicepostDate proxy)
+
+### 2026-04-03
+- consider the impact of seasonal trends on sales of consumable goods
+- keep a lookout for anomalies in revenue and cost metrics
+
+### 2026-04-03
+- Be cautious of seasonal trends in sales data
+- Always verify the integrity of revenue and cost calculations
+
+### 2026-04-06
+- When analyzing global conflict datasets, pay close attention to correlations between economic loss, military deaths, and climate zone.
+- Look for anomalies in refugee numbers and ceasefire outcomes to identify potential areas of concern.
+
+### 2026-04-07
+- Verify domain detection confidence when it's low
+- Explore column interactions for better insights

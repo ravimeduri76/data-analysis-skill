@@ -1,0 +1,9 @@
+{
+  "auto_install": true,
+  "allowed_packages": [
+    "openpyxl", "odfpy", "xlrd", "pyxlsb",
+    "pdfplumber", "python-pptx", "chardet"
+  ],
+  "csv_encodings": ["utf-8", "utf-8-sig", "latin-1", "cp1252", "iso-8859-1"],
+  "max_rows": 50000
+}
