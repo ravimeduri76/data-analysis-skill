@@ -1,1 +1,0 @@
-"""DataAXL application seed data."""
