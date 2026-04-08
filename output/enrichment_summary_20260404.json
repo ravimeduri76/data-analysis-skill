@@ -1,0 +1,13 @@
+{
+  "run_date": "2026-04-04",
+  "master_rows": 11,
+  "txn_rows": 102,
+  "enriched_rows": 11,
+  "enriched_cols": 21,
+  "features_added": 14,
+  "completeness_pct": 94.4,
+  "quality_score": 74.4,
+  "customers_with_txns": 9,
+  "customers_without_txns": 1,
+  "orphan_txn_contacts": 1
+}

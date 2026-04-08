@@ -28,6 +28,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
+    accuracy_score,
     average_precision_score,
     confusion_matrix,
     f1_score,
@@ -36,6 +37,7 @@ from sklearn.metrics import (
     r2_score,
     roc_auc_score,
 )
+from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
 log = logging.getLogger("ml_experiment")
@@ -161,36 +163,84 @@ def select_target(
 # ---------------------------------------------------------------------------
 # Leakage audit
 # ---------------------------------------------------------------------------
-def leakage_audit(X: pd.DataFrame, y: pd.Series) -> set[str]:
-    """Detect perfectly collinear / leaky columns via cross-tab + overlap test.
+def leakage_audit(
+    X: pd.DataFrame,
+    y: pd.Series,
+    threshold: float = 0.95,
+) -> set[str]:
+    """Detect likely post-prediction (leaky) features via correlation + MI.
+
+    Works for any task type (binary, multiclass, regression).  Two tests:
+
+    1. **Spearman correlation** (numeric features only): flags features with
+       |rho| >= threshold.  Spearman is rank-based so it catches monotonic
+       relationships between computed outcomes and the target (e.g. revenue
+       derived from quantity * price).
+    2. **Normalised mutual information** (all features): flags features with
+       NMI >= threshold.  Captures non-linear / categorical leakage that
+       correlation would miss.
+
+    A column must trigger *at least one* test to be flagged.  Flagged columns
+    are logged with their scores so the analyst can review whether the feature
+    is truly prior (pre-prediction) information or a post-prediction artefact.
 
     Returns set of column names to drop.
     """
+    from scipy.stats import spearmanr
+    from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+    from sklearn.preprocessing import LabelEncoder
+
     leaky: set[str] = set()
-    y_binary = y.astype(int) if y.dtype != int else y
+    reasons: dict[str, str] = {}
 
-    for col in X.columns:
-        if not pd.api.types.is_numeric_dtype(X[col]):
-            continue
+    if X.empty or len(X.columns) == 0:
+        return leaky
+
+    y_arr = y.to_numpy()
+    is_classification = y.nunique() <= 20
+
+    # --- Test 1: Spearman correlation (numeric features) -------------------
+    num_cols = X.select_dtypes(include="number").columns.tolist()
+    for col in num_cols:
         try:
-            nonzero_mask = X[col] > 0
-            if nonzero_mask.sum() == 0:
-                continue
-
-            # Cross-tab test: if feature>0 implies target=1 (no FP at all)
-            target_when_nonzero = y_binary[nonzero_mask]
-            if (target_when_nonzero == 0).sum() == 0:
+            rho, _ = spearmanr(X[col].to_numpy(), y_arr, nan_policy="omit")
+            if abs(rho) >= threshold:
                 leaky.add(col)
-                continue
-
-            # Overlap test: if count(feature>0) == count(target=1)
-            if nonzero_mask.sum() == (y_binary == 1).sum():
-                leaky.add(col)
+                reasons[col] = f"spearman={rho:.3f}"
         except Exception:
             pass
 
+    # --- Test 2: Normalised mutual information (all features) --------------
+    # Build a numeric matrix for MI calculation (encode categoricals)
+    X_mi = X.copy()
+    cat_cols = [c for c in X_mi.columns if not pd.api.types.is_numeric_dtype(X_mi[c])]
+    for c in cat_cols:
+        le = LabelEncoder()
+        X_mi[c] = le.fit_transform(X_mi[c].astype(str))
+    X_mi = X_mi.fillna(0).to_numpy()
+
+    try:
+        mi_func = mutual_info_classif if is_classification else mutual_info_regression
+        mi_scores = mi_func(X_mi, y_arr, random_state=42)
+
+        # Normalise: NMI = MI / max(MI) so the strongest feature = 1.0
+        mi_max = mi_scores.max()
+        if mi_max > 0:
+            nmi_scores = mi_scores / mi_max
+        else:
+            nmi_scores = mi_scores
+
+        for col, nmi in zip(X.columns, nmi_scores):
+            if nmi >= threshold:
+                leaky.add(col)
+                prev = reasons.get(col, "")
+                reasons[col] = f"{prev}; nmi={nmi:.3f}" if prev else f"nmi={nmi:.3f}"
+    except Exception as exc:
+        log.debug("MI calculation failed (non-fatal): %s", exc)
+
     if leaky:
-        log.warning("Leakage audit: dropping %d columns: %s", len(leaky), leaky)
+        detail = ", ".join(f"{c} ({reasons.get(c, '?')})" for c in sorted(leaky))
+        log.warning("Leakage audit: flagging %d columns: %s", len(leaky), detail)
     return leaky
 
 
@@ -212,10 +262,15 @@ def build_feature_matrix(
     drop_cols = {target_col} | set(id_cols or [])
     y_raw = df[target_col].copy()
 
-    # Encode y for binary
+    # Encode y
     if y_raw.nunique() == 2:
         vals = sorted(y_raw.dropna().unique())
         y = y_raw.map({vals[0]: 0, vals[1]: 1}).fillna(0).astype(int)
+    elif y_raw.nunique() <= 20:
+        # Multiclass: 0-index labels (required by XGBoost and others)
+        le = LabelEncoder()
+        y = pd.Series(le.fit_transform(y_raw.fillna(y_raw.mode().iloc[0])),
+                       index=y_raw.index, name=y_raw.name)
     else:
         y = pd.to_numeric(y_raw, errors="coerce").fillna(0)
 
@@ -288,9 +343,91 @@ def evaluate_regression(name: str, y_true: np.ndarray,
     return dict(Model=name, R2=round(r2, 4), RMSE=round(rmse, 4))
 
 
+def evaluate_multiclass(name: str, y_true: np.ndarray,
+                        y_pred: np.ndarray,
+                        y_prob: np.ndarray | None = None) -> dict:
+    """Compute multiclass metrics.
+
+    Returns dict with: Model, Accuracy, Macro_F1, Weighted_F1, MCC,
+    and optionally ROC_AUC_OVR if probability estimates are available.
+    """
+    acc = accuracy_score(y_true, y_pred)
+    macro_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    weighted_f1 = f1_score(y_true, y_pred, average="weighted", zero_division=0)
+    mcc = matthews_corrcoef(y_true, y_pred)
+
+    result = dict(
+        Model=name,
+        Accuracy=round(acc, 4),
+        Macro_F1=round(macro_f1, 4),
+        Weighted_F1=round(weighted_f1, 4),
+        MCC=round(mcc, 4),
+    )
+
+    if y_prob is not None:
+        try:
+            roc = roc_auc_score(y_true, y_prob, multi_class="ovr", average="weighted")
+            result["ROC_AUC_OVR"] = round(roc, 4)
+        except Exception:
+            pass
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Model roster
 # ---------------------------------------------------------------------------
+
+# TabPFN size thresholds — mandatory for small datasets
+TABPFN_MAX_ROWS = 10_000
+TABPFN_MAX_FEATURES = 100
+
+
+def _maybe_prepend_tabpfn(
+    roster: list[dict],
+    n_rows: int,
+    n_features: int,
+    task_type: str,
+) -> list[dict]:
+    """Ensure TabPFN is first in roster for small datasets.
+
+    If n_rows <= TABPFN_MAX_ROWS and n_features <= TABPFN_MAX_FEATURES and
+    task_type is classification, move TabPFN to front of roster (or add it).
+    This makes TabPFN run first, giving it priority on the leaderboard.
+    """
+    if task_type not in ("binary", "multiclass"):
+        return roster  # TabPFN is classification-only
+
+    if n_rows > TABPFN_MAX_ROWS or n_features > TABPFN_MAX_FEATURES:
+        return roster  # Too large for TabPFN
+
+    # Check if TabPFN is already in the roster
+    tabpfn_entry = None
+    rest = []
+    for entry in roster:
+        if entry["name"] == "TabPFN":
+            tabpfn_entry = entry
+        else:
+            rest.append(entry)
+
+    if tabpfn_entry is None:
+        # Not in roster (import failed) — try adding it now
+        try:
+            from tabpfn import TabPFNClassifier
+            tabpfn_entry = {
+                "name": "TabPFN",
+                "model": TabPFNClassifier(n_estimators=8, random_state=42, ignore_pretraining_limits=True),
+                "description": "TabPFN prior-fitted transformer (zero-shot, mandatory for small data)",
+            }
+        except ImportError:
+            log.info("TabPFN not installed — skipping mandatory small-data inclusion")
+            return roster
+
+    # Prepend TabPFN so it runs first
+    log.info("TabPFN mandatory: %d rows, %d features — prepending to roster", n_rows, n_features)
+    return [tabpfn_entry] + rest
+
+
 def _build_model_roster_binary() -> list[dict]:
     """Build the default model roster for binary classification."""
     from sklearn.ensemble import RandomForestClassifier
@@ -371,6 +508,21 @@ def _build_model_roster_binary() -> list[dict]:
         ]),
         "description": "MLP (128,64) early_stopping",
     })
+
+    # TabPFN (optional — mandatory for small datasets via _maybe_prepend_tabpfn)
+    try:
+        from tabpfn import TabPFNClassifier
+        roster.append({
+            "name": "TabPFN",
+            "model": TabPFNClassifier(
+                n_estimators=8,
+                random_state=42,
+                ignore_pretraining_limits=True,
+            ),
+            "description": "TabPFN prior-fitted transformer (zero-shot, no training)",
+        })
+    except ImportError:
+        log.info("TabPFN not installed -- skipping (pip install tabpfn)")
 
     return roster
 
@@ -953,7 +1105,12 @@ def run_experiment_loop(
         strategy_path, llm_proposals, best_feature_set, best_importances
     """
     if primary_metric is None:
-        primary_metric = "PR_AUC" if task_type == "binary" else "R2"
+        if task_type == "binary":
+            primary_metric = "PR_AUC"
+        elif task_type == "multiclass":
+            primary_metric = "Macro_F1"
+        else:
+            primary_metric = "R2"
 
     is_classification = task_type in ("binary", "multiclass")
     llm_enabled = bool(anthropic_api_key)
@@ -968,6 +1125,9 @@ def run_experiment_loop(
         roster = _build_model_roster_binary()
     else:
         roster = _build_model_roster_regression()
+
+    # TabPFN: mandatory first for small classification datasets
+    roster = _maybe_prepend_tabpfn(roster, len(X), len(feature_names), task_type)
 
     # Keep original X for LLM-guided rounds (mutations start fresh each time)
     X_original = X.copy()
@@ -1002,7 +1162,17 @@ def run_experiment_loop(
             model.fit(trial_X_train, y_train)
             elapsed = time.time() - t0
 
-            if is_classification:
+            if task_type == "multiclass":
+                y_pred = model.predict(trial_X_test)
+                y_prob_all = None
+                if hasattr(model, "predict_proba"):
+                    try:
+                        y_prob_all = model.predict_proba(trial_X_test)
+                    except Exception:
+                        pass
+                metrics = evaluate_multiclass(
+                    entry["name"], y_test.values, y_pred, y_prob_all)
+            elif is_classification:
                 y_prob = model.predict_proba(trial_X_test)[:, 1]
                 y_pred = (y_prob >= 0.5).astype(int)
                 metrics = evaluate(entry["name"], y_test.values, y_prob, y_pred)
@@ -1393,3 +1563,561 @@ def render_experiment_summary(result: dict) -> str:
     # ASCII-safe
     text = text.encode("ascii", errors="replace").decode("ascii")
     return text
+
+
+# ---------------------------------------------------------------------------
+# Extracted trial runner (for use by research_orchestrator)
+# ---------------------------------------------------------------------------
+def run_single_trial(
+    entry: dict,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train: pd.Series,
+    y_test: pd.Series,
+    feature_names: list[str],
+    task_type: str,
+    primary_metric: str,
+) -> dict:
+    """Run a single model trial and return metrics dict.
+
+    Standalone version of the inner _run_trial closure for reuse by
+    research_orchestrator.  Does NOT maintain incumbent state.
+
+    Returns dict with: model, metrics, status, description, n_features,
+    elapsed_s, fitted_model.
+    """
+    try:
+        t0 = time.time()
+        model = entry["model"]
+        model.fit(X_train, y_train)
+        elapsed = time.time() - t0
+
+        is_classification = task_type in ("binary", "multiclass")
+
+        if task_type == "multiclass":
+            y_pred = model.predict(X_test)
+            y_prob_all = None
+            if hasattr(model, "predict_proba"):
+                try:
+                    y_prob_all = model.predict_proba(X_test)
+                except Exception:
+                    pass
+            metrics = evaluate_multiclass(entry["name"], y_test.values, y_pred, y_prob_all)
+        elif is_classification:
+            y_prob = model.predict_proba(X_test)[:, 1]
+            y_pred = (y_prob >= 0.5).astype(int)
+            metrics = evaluate(entry["name"], y_test.values, y_prob, y_pred)
+        else:
+            y_pred = model.predict(X_test)
+            metrics = evaluate_regression(entry["name"], y_test.values, y_pred)
+
+        score = metrics.get(primary_metric, -np.inf)
+        return {
+            "model": entry["name"],
+            "metrics": metrics,
+            "status": "evaluated",
+            "description": entry.get("description", ""),
+            "n_features": len(feature_names),
+            "elapsed_s": round(elapsed, 2),
+            "score": score,
+            "fitted_model": model,
+        }
+    except Exception as exc:
+        log.error("Trial %s crashed: %s", entry["name"], exc)
+        return {
+            "model": entry["name"],
+            "metrics": {},
+            "status": "crash",
+            "description": f"{entry.get('description', '')} -- ERROR: {exc}",
+            "n_features": len(feature_names),
+            "elapsed_s": 0,
+            "score": -np.inf,
+            "fitted_model": None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# K-Fold cross-validation
+# ---------------------------------------------------------------------------
+def run_kfold_evaluation(
+    model_entry: dict,
+    X: pd.DataFrame,
+    y: pd.Series,
+    feature_names: list[str],
+    task_type: str,
+    primary_metric: str,
+    n_splits: int = 5,
+) -> dict:
+    """Run stratified K-fold CV on a single model entry.
+
+    Returns dict with: model, mean_score, std_score, fold_scores, primary_metric.
+    """
+    import copy
+    is_classification = task_type in ("binary", "multiclass")
+
+    if is_classification:
+        kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        split_iter = kf.split(X, y)
+    else:
+        from sklearn.model_selection import KFold
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        split_iter = kf.split(X)
+
+    fold_scores: list[float] = []
+    for train_idx, val_idx in split_iter:
+        X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+        y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+        model = copy.deepcopy(model_entry["model"])
+        try:
+            model.fit(X_tr, y_tr)
+            if task_type == "multiclass":
+                y_pred = model.predict(X_val)
+                y_prob_all = None
+                if hasattr(model, "predict_proba"):
+                    try:
+                        y_prob_all = model.predict_proba(X_val)
+                    except Exception:
+                        pass
+                metrics = evaluate_multiclass(model_entry["name"], y_val.values, y_pred, y_prob_all)
+            elif is_classification:
+                y_prob = model.predict_proba(X_val)[:, 1]
+                y_pred = (y_prob >= 0.5).astype(int)
+                metrics = evaluate(model_entry["name"], y_val.values, y_prob, y_pred)
+            else:
+                y_pred = model.predict(X_val)
+                metrics = evaluate_regression(model_entry["name"], y_val.values, y_pred)
+
+            fold_scores.append(metrics.get(primary_metric, -np.inf))
+        except Exception as exc:
+            log.warning("K-fold: fold crashed for %s: %s", model_entry["name"], exc)
+            fold_scores.append(-np.inf)
+
+    valid_scores = [s for s in fold_scores if s > -np.inf]
+    mean_score = float(np.mean(valid_scores)) if valid_scores else -np.inf
+    std_score = float(np.std(valid_scores)) if len(valid_scores) > 1 else 0.0
+
+    return {
+        "model": model_entry["name"],
+        "mean_score": round(mean_score, 4),
+        "std_score": round(std_score, 4),
+        "fold_scores": [round(s, 4) for s in fold_scores],
+        "primary_metric": primary_metric,
+        "n_splits": n_splits,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap confidence intervals
+# ---------------------------------------------------------------------------
+def run_bootstrap_ci(
+    model_entry: dict,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train: pd.Series,
+    y_test: pd.Series,
+    feature_names: list[str],
+    task_type: str,
+    primary_metric: str,
+    n_bootstrap: int = 200,
+) -> dict:
+    """Compute bootstrap confidence intervals for a model's test performance.
+
+    Returns dict with: model, point_estimate, ci_lower, ci_upper, n_bootstrap.
+    """
+    is_classification = task_type in ("binary", "multiclass")
+    rng = np.random.RandomState(42)
+
+    # Fit model once
+    import copy
+    model = copy.deepcopy(model_entry["model"])
+    model.fit(X_train, y_train)
+
+    # Get predictions once
+    if task_type == "multiclass":
+        y_pred = model.predict(X_test)
+        y_prob_all = None
+        if hasattr(model, "predict_proba"):
+            try:
+                y_prob_all = model.predict_proba(X_test)
+            except Exception:
+                pass
+    elif is_classification:
+        y_prob = model.predict_proba(X_test)[:, 1]
+        y_pred = (y_prob >= 0.5).astype(int)
+    else:
+        y_pred = model.predict(X_test)
+
+    # Bootstrap on test set
+    n_test = len(y_test)
+    boot_scores: list[float] = []
+    y_test_arr = y_test.values
+
+    for _ in range(n_bootstrap):
+        idx = rng.choice(n_test, size=n_test, replace=True)
+        try:
+            if task_type == "multiclass":
+                m = evaluate_multiclass(model_entry["name"], y_test_arr[idx], y_pred[idx],
+                                        y_prob_all[idx] if y_prob_all is not None else None)
+            elif is_classification:
+                m = evaluate(model_entry["name"], y_test_arr[idx], y_prob[idx], y_pred[idx])
+            else:
+                m = evaluate_regression(model_entry["name"], y_test_arr[idx], y_pred[idx])
+            boot_scores.append(m.get(primary_metric, -np.inf))
+        except Exception:
+            pass
+
+    valid = [s for s in boot_scores if s > -np.inf]
+    if valid:
+        point = float(np.mean(valid))
+        ci_lo = float(np.percentile(valid, 2.5))
+        ci_hi = float(np.percentile(valid, 97.5))
+    else:
+        point, ci_lo, ci_hi = -np.inf, -np.inf, -np.inf
+
+    return {
+        "model": model_entry["name"],
+        "point_estimate": round(point, 4),
+        "ci_lower": round(ci_lo, 4),
+        "ci_upper": round(ci_hi, 4),
+        "n_bootstrap": len(valid),
+        "primary_metric": primary_metric,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Ensemble builders
+# ---------------------------------------------------------------------------
+def build_voting_ensemble(
+    top_models: list[dict],
+    task_type: str,
+    voting: str = "soft",
+) -> dict:
+    """Build a VotingClassifier/Regressor roster entry from top model entries.
+
+    Returns a roster entry dict: {name, model, description}.
+    """
+    import copy
+    is_classification = task_type in ("binary", "multiclass")
+
+    estimators = []
+    for i, entry in enumerate(top_models[:5]):
+        estimators.append((f"m{i}_{entry['name']}", copy.deepcopy(entry["model"])))
+
+    names = [e["name"] for e in top_models[:5]]
+
+    if is_classification:
+        from sklearn.ensemble import VotingClassifier
+        ensemble = VotingClassifier(estimators=estimators, voting=voting, n_jobs=-1)
+    else:
+        from sklearn.ensemble import VotingRegressor
+        ensemble = VotingRegressor(estimators=estimators, n_jobs=-1)
+
+    return {
+        "name": f"Voting_{voting}",
+        "model": ensemble,
+        "description": f"Voting({voting}) ensemble of {', '.join(names)}",
+    }
+
+
+def build_stacking_ensemble(
+    base_models: list[dict],
+    meta_learner: dict,
+    task_type: str,
+) -> dict:
+    """Build a StackingClassifier/Regressor roster entry.
+
+    Returns a roster entry dict: {name, model, description}.
+    """
+    import copy
+    is_classification = task_type in ("binary", "multiclass")
+
+    estimators = []
+    for i, entry in enumerate(base_models[:5]):
+        estimators.append((f"b{i}_{entry['name']}", copy.deepcopy(entry["model"])))
+
+    final = copy.deepcopy(meta_learner["model"])
+    names = [e["name"] for e in base_models[:5]]
+
+    if is_classification:
+        from sklearn.ensemble import StackingClassifier
+        ensemble = StackingClassifier(
+            estimators=estimators, final_estimator=final,
+            cv=3, n_jobs=-1, passthrough=False,
+        )
+    else:
+        from sklearn.ensemble import StackingRegressor
+        ensemble = StackingRegressor(
+            estimators=estimators, final_estimator=final,
+            cv=3, n_jobs=-1, passthrough=False,
+        )
+
+    return {
+        "name": f"Stacking_{meta_learner['name']}",
+        "model": ensemble,
+        "description": f"Stacking({', '.join(names)}) meta={meta_learner['name']}",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Extended model roster
+# ---------------------------------------------------------------------------
+def build_extended_model_roster(task_type: str) -> list[dict]:
+    """Build an extended roster with CatBoost, ExtraTrees, GradientBoosting, SVM, KNN.
+
+    Returns list of roster entry dicts. Models that fail to import are skipped.
+    """
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import RobustScaler
+
+    is_classification = task_type in ("binary", "multiclass")
+    roster: list[dict] = []
+
+    # GradientBoosting (always available)
+    if is_classification:
+        from sklearn.ensemble import GradientBoostingClassifier
+        roster.append({
+            "name": "GradientBoosting",
+            "model": GradientBoostingClassifier(
+                n_estimators=200, learning_rate=0.05, max_depth=5,
+                random_state=42,
+            ),
+            "description": "GBM n=200 lr=0.05",
+        })
+    else:
+        from sklearn.ensemble import GradientBoostingRegressor
+        roster.append({
+            "name": "GradientBoosting",
+            "model": GradientBoostingRegressor(
+                n_estimators=200, learning_rate=0.05, max_depth=5,
+                random_state=42,
+            ),
+            "description": "GBM regressor n=200 lr=0.05",
+        })
+
+    # ExtraTrees
+    if is_classification:
+        from sklearn.ensemble import ExtraTreesClassifier
+        roster.append({
+            "name": "ExtraTrees",
+            "model": ExtraTreesClassifier(
+                n_estimators=200, class_weight="balanced",
+                random_state=42, n_jobs=-1,
+            ),
+            "description": "ExtraTrees n=200 balanced",
+        })
+    else:
+        from sklearn.ensemble import ExtraTreesRegressor
+        roster.append({
+            "name": "ExtraTrees",
+            "model": ExtraTreesRegressor(
+                n_estimators=200, random_state=42, n_jobs=-1,
+            ),
+            "description": "ExtraTrees regressor n=200",
+        })
+
+    # SVM (with scaling)
+    if is_classification:
+        from sklearn.svm import SVC
+        roster.append({
+            "name": "SVM",
+            "model": Pipeline([
+                ("scaler", RobustScaler()),
+                ("svm", SVC(
+                    kernel="rbf", probability=True,
+                    class_weight="balanced", random_state=42,
+                )),
+            ]),
+            "description": "SVM RBF balanced (RobustScaler)",
+        })
+    else:
+        from sklearn.svm import SVR
+        roster.append({
+            "name": "SVM",
+            "model": Pipeline([
+                ("scaler", RobustScaler()),
+                ("svm", SVR(kernel="rbf")),
+            ]),
+            "description": "SVR RBF (RobustScaler)",
+        })
+
+    # KNN (with scaling)
+    from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+    if is_classification:
+        roster.append({
+            "name": "KNN",
+            "model": Pipeline([
+                ("scaler", RobustScaler()),
+                ("knn", KNeighborsClassifier(n_neighbors=7, n_jobs=-1)),
+            ]),
+            "description": "KNN k=7 (RobustScaler)",
+        })
+    else:
+        roster.append({
+            "name": "KNN",
+            "model": Pipeline([
+                ("scaler", RobustScaler()),
+                ("knn", KNeighborsRegressor(n_neighbors=7, n_jobs=-1)),
+            ]),
+            "description": "KNN k=7 regressor (RobustScaler)",
+        })
+
+    # CatBoost (optional)
+    try:
+        if is_classification:
+            from catboost import CatBoostClassifier
+            roster.append({
+                "name": "CatBoost",
+                "model": CatBoostClassifier(
+                    iterations=300, learning_rate=0.05,
+                    depth=6, random_seed=42, verbose=0,
+                    auto_class_weights="Balanced",
+                ),
+                "description": "CatBoost balanced lr=0.05",
+            })
+        else:
+            from catboost import CatBoostRegressor
+            roster.append({
+                "name": "CatBoost",
+                "model": CatBoostRegressor(
+                    iterations=300, learning_rate=0.05,
+                    depth=6, random_seed=42, verbose=0,
+                ),
+                "description": "CatBoost regressor lr=0.05",
+            })
+    except ImportError:
+        log.info("CatBoost not installed -- skipping")
+
+    # TabPFN (classification only — included in extended roster too)
+    if is_classification:
+        try:
+            from tabpfn import TabPFNClassifier
+            roster.append({
+                "name": "TabPFN",
+                "model": TabPFNClassifier(
+                    n_estimators=8,
+                    random_state=42,
+                    ignore_pretraining_limits=True,
+                ),
+                "description": "TabPFN prior-fitted transformer (zero-shot)",
+            })
+        except ImportError:
+            log.info("TabPFN not installed -- skipping (pip install tabpfn)")
+
+    return roster
+
+
+# ---------------------------------------------------------------------------
+# Interpretation: SHAP summary
+# ---------------------------------------------------------------------------
+def compute_shap_summary(
+    model: Any,
+    X_test: pd.DataFrame,
+    feature_names: list[str],
+    out_dir: str | Path | None = None,
+) -> dict:
+    """Compute SHAP summary for a fitted model.
+
+    Returns dict with: shap_importances (list of (name, mean_abs_shap)),
+    plot_path (str or None).
+    """
+    try:
+        import shap
+    except ImportError:
+        log.info("SHAP not installed -- returning empty summary")
+        return {"shap_importances": [], "plot_path": None}
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Unwrap pipeline
+    estimator = model
+    X_explain = X_test
+    if hasattr(estimator, "steps"):
+        # Transform X through all steps except the last
+        for name, step in estimator.steps[:-1]:
+            X_explain = step.transform(X_explain)
+        estimator = estimator.steps[-1][1]
+
+    try:
+        if hasattr(estimator, "feature_importances_"):
+            explainer = shap.TreeExplainer(estimator)
+        else:
+            # Subsample for kernel SHAP (expensive)
+            bg = shap.sample(X_explain, min(50, len(X_explain)))
+            explainer = shap.KernelExplainer(estimator.predict, bg)
+
+        shap_values = explainer.shap_values(X_explain[:min(200, len(X_explain))])
+    except Exception as exc:
+        log.warning("SHAP computation failed: %s", exc)
+        return {"shap_importances": [], "plot_path": None}
+
+    # Handle multi-output SHAP (binary classifiers may return list)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+
+    mean_abs = np.abs(shap_values).mean(axis=0)
+    if len(mean_abs) != len(feature_names):
+        # Feature name mismatch after pipeline transform
+        feat_names_used = [f"f{i}" for i in range(len(mean_abs))]
+    else:
+        feat_names_used = list(feature_names)
+
+    indices = np.argsort(mean_abs)[::-1][:15]
+    importances = [(feat_names_used[i], round(float(mean_abs[i]), 6)) for i in indices]
+
+    plot_path = None
+    if out_dir:
+        try:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            shap.summary_plot(shap_values, X_explain[:min(200, len(X_explain))],
+                              feature_names=feat_names_used, show=False)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+            plot_path = str(Path(out_dir) / f"shap_summary_{ts}.png")
+            plt.savefig(plot_path, dpi=100, bbox_inches="tight")
+            plt.close(fig)
+        except Exception as exc:
+            log.warning("SHAP plot failed: %s", exc)
+
+    return {"shap_importances": importances, "plot_path": plot_path}
+
+
+# ---------------------------------------------------------------------------
+# Interpretation: Permutation importance
+# ---------------------------------------------------------------------------
+def compute_permutation_importance(
+    model: Any,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    feature_names: list[str],
+    task_type: str,
+    n_repeats: int = 10,
+) -> list[tuple[str, float]]:
+    """Compute permutation importance for a fitted model.
+
+    Returns sorted list of (feature_name, mean_importance) tuples, top 15.
+    """
+    from sklearn.inspection import permutation_importance as perm_imp
+
+    is_classification = task_type in ("binary", "multiclass")
+    scoring = "average_precision" if task_type == "binary" else (
+        "f1_macro" if task_type == "multiclass" else "r2"
+    )
+
+    try:
+        result = perm_imp(
+            model, X_test, y_test,
+            n_repeats=n_repeats, random_state=42,
+            scoring=scoring, n_jobs=-1,
+        )
+    except Exception as exc:
+        log.warning("Permutation importance failed: %s", exc)
+        return []
+
+    means = result.importances_mean
+    if len(means) != len(feature_names):
+        return []
+
+    indices = np.argsort(means)[::-1][:15]
+    return [(feature_names[i], round(float(means[i]), 6)) for i in indices]

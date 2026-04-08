@@ -1,0 +1,11 @@
+{
+  "solution_id": "system_admin",
+  "app_id": "base",
+  "name": "System Admin",
+  "description": "System administration — agent registry management, user/role configuration, subscription management",
+  "modules": ["registry_builder", "user_role", "subscription"],
+  "primary_agents": ["AG01", "AG02", "AG03", "AG39"],
+  "execution_plans": [],
+  "intent_patterns": ["manage agents", "registry builder", "user management", "subscription"],
+  "domains": ["Any"]
+}

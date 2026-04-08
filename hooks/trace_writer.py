@@ -8,6 +8,7 @@ AnalysisTrace(dataset_path, query, domain_ctx)
     .log_step(step_name, description, params, result_summary)
     .log_artifact(file_path, description, row_count, col_count)
     .log_insight(card)
+    .log_packet(packet_name, packet_data)
     .save_manifest(output_dir) -> (json_path, md_path)
     .render_breadcrumbs()      -> str
 """
@@ -57,6 +58,7 @@ class AnalysisTrace:
         self._steps: list = []
         self._artifacts: list = []
         self._insights: list = []
+        self._packets: list[dict] = []
         self._manifest_files: list = []
         self.metrics: dict = {
             "coverage_score": 0.0,
@@ -104,6 +106,16 @@ class AnalysisTrace:
         })
         return self
 
+    def log_packet(self, packet_name: str, packet_data: dict) -> "AnalysisTrace":
+        """Record a DESO context packet (DCP, IS, AP, ES) for replay."""
+        safe_data = json.loads(json.dumps(packet_data, default=str))
+        self._packets.append({
+            "name": packet_name,
+            "data": safe_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        return self
+
     def log_insight(self, card: object) -> "AnalysisTrace":
         """Append an InsightCard (dataclass or plain object) to the trace."""
         try:
@@ -138,6 +150,7 @@ class AnalysisTrace:
             "steps": self._steps,
             "artifacts": self._artifacts,
             "insights": self._insights,
+            "context_packets": {p["name"]: p["data"] for p in self._packets},
         }
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, default=str)
@@ -195,6 +208,20 @@ class AnalysisTrace:
             method = _safe_cell(ins.get("method", ""))
             confidence = _safe_cell(ins.get("confidence", ""))
             md_lines.append(f"| {i} | {finding} | {method} | {confidence} |")
+
+        if self._packets:
+            md_lines += [
+                "",
+                "## Context Packets",
+                "",
+                "| # | Packet | Keys | Timestamp |",
+                "|---|--------|------|-----------|",
+            ]
+            for i, pkt in enumerate(self._packets, 1):
+                keys = ", ".join(sorted(pkt["data"].keys())) if isinstance(pkt["data"], dict) else "N/A"
+                md_lines.append(
+                    f"| {i} | {_safe_cell(pkt['name'])} | {_safe_cell(keys)} | {_safe_cell(pkt['timestamp'])} |"
+                )
 
         with open(md_path, "w", encoding="utf-8") as f:
             f.write("\n".join(md_lines) + "\n")

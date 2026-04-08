@@ -1,0 +1,15 @@
+{
+  "solution_id": "customer_data_prep",
+  "app_id": "dataaxl",
+  "name": "Customer Data Prep",
+  "description": "Ingest from SAP/JDE, search and match, golden record management, address enrichment",
+  "modules": ["data_pipeline", "search_match", "golden_record_management", "address_enrichment"],
+  "primary_agents": ["AG04", "AG07", "AG23", "AG27", "AG28", "AG25"],
+  "execution_plans": ["customer_data_prep_pipeline"],
+  "intent_patterns": ["customer data prep", "sap ingest", "jde ingest", "customer match", "customer dedup", "golden record", "address enrichment", "customer 360"],
+  "column_signals": [
+    "Customer", "Account", "Address", "City", "State", "Zip",
+    "Phone", "Email", "SAP", "JDE", "Contact", "Company"
+  ],
+  "domains": ["Master Data Management"]
+}

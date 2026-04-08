@@ -1,0 +1,1 @@
+"""CareAXL application seed data."""

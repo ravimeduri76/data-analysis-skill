@@ -402,17 +402,32 @@ def _get_domain_conn_safe():
     """Return DB connection or None (no crash if DB down)."""
     try:
         import psycopg2
-        env_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "Data_Analysis", ".env",
-        )
-        if os.path.exists(env_path):
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        os.environ.setdefault(k.strip(), v.strip())
+        # Try vault first
+        try:
+            import importlib.util
+            _vault_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "shared", "env_vault.py",
+            )
+            _spec = importlib.util.spec_from_file_location("env_vault", _vault_path)
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _mod.load_vault()
+        except Exception:
+            pass
+        # Fallback: plain .env
+        if not os.environ.get("DOMAIN_DB_URL"):
+            env_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "Data_Analysis", ".env",
+            )
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            os.environ.setdefault(k.strip(), v.strip())
         url = os.environ.get(
             "DOMAIN_DB_URL",
             "postgresql://postgres:memorystorepg@localhost:5432/domain",

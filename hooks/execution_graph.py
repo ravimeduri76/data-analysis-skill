@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS execution_examples (
     selected_plan    VARCHAR(200) NOT NULL,
     reasoning        TEXT NOT NULL,
     plan_overrides   JSONB,
+    app_id           VARCHAR(100) DEFAULT 'base',
     created_at       TIMESTAMP DEFAULT NOW()
 );
 
@@ -175,10 +176,24 @@ CREATE INDEX IF NOT EXISTS idx_exec_examples_plan   ON execution_examples (selec
 """
 
 
+_MIGRATE_EXAMPLES_APP_ID = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'execution_examples' AND column_name = 'app_id'
+    ) THEN
+        ALTER TABLE execution_examples ADD COLUMN app_id VARCHAR(100) DEFAULT 'base';
+    END IF;
+END $$;
+"""
+
+
 def init_execution_db(conn) -> None:
     """Create all execution graph tables and indexes (idempotent)."""
     with conn.cursor() as cur:
         cur.execute(_INIT_SQL)
+        cur.execute(_MIGRATE_EXAMPLES_APP_ID)
     conn.commit()
 
 
@@ -579,6 +594,7 @@ def add_execution_example(
     selected_plan: str,
     reasoning: str,
     plan_overrides: Optional[dict] = None,
+    app_id: str = "base",
 ) -> int:
     """Add a few-shot reasoning example. Returns example id."""
     with conn.cursor() as cur:
@@ -586,14 +602,15 @@ def add_execution_example(
             """
             INSERT INTO execution_examples
                 (example_name, intent_context, domain_context, selected_plan,
-                 reasoning, plan_overrides)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                 reasoning, plan_overrides, app_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (example_name) DO UPDATE
               SET intent_context = EXCLUDED.intent_context,
                   domain_context = EXCLUDED.domain_context,
                   selected_plan  = EXCLUDED.selected_plan,
                   reasoning      = EXCLUDED.reasoning,
-                  plan_overrides = EXCLUDED.plan_overrides
+                  plan_overrides = EXCLUDED.plan_overrides,
+                  app_id         = EXCLUDED.app_id
             RETURNING id
             """,
             (
@@ -602,23 +619,25 @@ def add_execution_example(
                 json.dumps(domain_context, default=str),
                 selected_plan, reasoning,
                 json.dumps(plan_overrides, default=str) if plan_overrides else None,
+                app_id,
             ),
         )
         return cur.fetchone()[0]
 
 
-def get_execution_examples(conn, limit: int = 20) -> list[dict]:
-    """Fetch few-shot examples, most recent first."""
+def get_execution_examples(conn, limit: int = 20, app_id: str = "base") -> list[dict]:
+    """Fetch few-shot examples, scoped by app_id (own + base)."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT id, example_name, intent_context, domain_context,
                    selected_plan, reasoning, plan_overrides
             FROM execution_examples
+            WHERE (app_id = %s OR app_id = 'base')
             ORDER BY id
             LIMIT %s
             """,
-            (limit,),
+            (app_id, limit),
         )
         rows = cur.fetchall()
     results = []
@@ -645,15 +664,8 @@ _embed_cache: dict = {}
 def _get_embed_model():
     """Load BGE-M3 (cached). Returns None if sentence-transformers unavailable."""
     if "model" not in _embed_cache:
-        try:
-            from sentence_transformers import SentenceTransformer
-            import warnings
-            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                _embed_cache["model"] = SentenceTransformer("BAAI/bge-m3")
-        except Exception:
-            _embed_cache["model"] = None
+        from hooks.embedding_registry import get_embed_model
+        _embed_cache["model"] = get_embed_model()
     return _embed_cache["model"]
 
 
@@ -1220,7 +1232,7 @@ def resolve_execution_plan(
         try:
             cards = list_agent_cards(conn, app_id=app_id)
             plans = list_execution_plans(conn)
-            examples = get_execution_examples(conn, limit=10)
+            examples = get_execution_examples(conn, limit=10, app_id=app_id)
             messages = _build_llm_prompt(intent_context, dcp, cards, plans, examples)
             llm_result = _call_llm(api_key, messages)
             if llm_result and llm_result.get("plan_name"):

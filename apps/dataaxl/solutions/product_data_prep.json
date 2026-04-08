@@ -1,0 +1,25 @@
+{
+  "solution_id": "product_data_prep",
+  "app_id": "dataaxl",
+  "name": "Product Data Prep",
+  "description": "Ingest from Syndigo/Stibo, harmonize schemas, recommend structure, enrich product data with physical dimensions, attributes, and cross-references",
+  "modules": ["data_pipeline", "harmonize", "schema_recommend", "enrich"],
+  "primary_agents": ["AG04", "AG07", "AG08", "AG09", "AG10", "AG25", "AG26", "AG24"],
+  "execution_plans": ["product_data_prep_pipeline"],
+  "intent_patterns": [
+    "product data prep", "product enrichment", "product enrich",
+    "enrich product", "enrich sku", "enrich parts",
+    "standardize product", "standardize sku", "standardize parts",
+    "physical dimensions", "package dimensions",
+    "syndigo ingest", "stibo ingest",
+    "product harmonize", "product schema",
+    "sku enrichment", "part enrichment",
+    "product catalog", "product attributes"
+  ],
+  "column_signals": [
+    "PIES", "ACES", "Part Number", "Vendor Part", "Brand",
+    "Cross reference", "Category L1", "Category L2", "Category L3",
+    "SKU", "UPC", "GTIN", "Long Description", "Short Description"
+  ],
+  "domains": ["Commercial / Industrial", "Automotive Aftermarket / Heavy Truck"]
+}

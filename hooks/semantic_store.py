@@ -46,18 +46,13 @@ def get_model():
     """Return the BGE-M3 SentenceTransformer (loaded once, cached globally)."""
     global _MODEL
     if _MODEL is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
+        from hooks.embedding_registry import get_embed_model
+        _MODEL = get_embed_model()
+        if _MODEL is None:
             raise ImportError(
                 "sentence-transformers is required for semantic search. "
                 "Install with: pip install sentence-transformers"
-            ) from exc
-        import warnings, os
-        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            _MODEL = SentenceTransformer(_MODEL_NAME)
+            )
     return _MODEL
 
 

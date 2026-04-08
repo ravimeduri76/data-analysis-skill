@@ -1,0 +1,11 @@
+{
+  "solution_id": "wellness_preventative_health",
+  "app_id": "careaxl",
+  "name": "Wellness & Preventative Health",
+  "description": "Population health analytics, screening compliance tracking, chronic disease management, vaccination records, and preventative care gap analysis",
+  "modules": ["population_health", "screening_compliance", "chronic_disease", "vaccination_tracking", "care_gaps"],
+  "primary_agents": ["AG04", "AG06", "AG07", "AG14", "AG25", "AG29", "AG30", "AG36"],
+  "execution_plans": ["wellness_analytics_pipeline", "preventative_screening_pipeline"],
+  "intent_patterns": ["wellness", "screening compliance", "chronic disease", "vaccination", "preventative care", "care gap", "HEDIS", "population health", "A1C", "annual wellness visit", "AWV"],
+  "domains": ["Healthcare"]
+}

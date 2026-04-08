@@ -1,0 +1,11 @@
+{
+  "solution_id": "patient_360",
+  "app_id": "careaxl",
+  "name": "Patient 360",
+  "description": "Golden record construction, entity resolution, longitudinal patient view, and care coordination across facilities",
+  "modules": ["entity_resolution", "golden_record", "longitudinal_view", "care_coordination"],
+  "primary_agents": ["AG04", "AG06", "AG07", "AG08", "AG09", "AG23", "AG25", "AG26", "AG27", "AG28"],
+  "execution_plans": ["patient_360_pipeline"],
+  "intent_patterns": ["patient 360", "golden record", "entity resolution", "longitudinal view", "MPI", "EMPI", "master patient index", "patient matching", "care coordination", "patient master data"],
+  "domains": ["Healthcare", "MDM"]
+}

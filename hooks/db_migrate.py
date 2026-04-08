@@ -19,6 +19,19 @@ from typing import Optional
 
 
 def _load_env() -> None:
+    try:
+        import importlib.util
+        _vault_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "shared", "env_vault.py",
+        )
+        _spec = importlib.util.spec_from_file_location("env_vault", _vault_path)
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        if _mod.load_vault():
+            return
+    except Exception:
+        pass
     env_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "Data_Analysis", ".env",

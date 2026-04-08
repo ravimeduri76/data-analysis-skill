@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,8 @@ _ENV_FILE = Path(r"C:\Users\Ravi\Data_Analysis\.env")
 
 # Ensure base-level modules are importable
 sys.path.insert(0, str(_BASE_DIR))
+# Shared modules (research/shared/)
+sys.path.insert(0, str(_BASE_DIR.parent / "shared"))
 
 
 # ---------------------------------------------------------------------------
@@ -59,14 +62,20 @@ log = logging.getLogger("kaggle_daily")
 # .env loader
 # ---------------------------------------------------------------------------
 def _load_env() -> None:
-    """Load environment variables from .env file."""
+    """Load environment variables from encrypted vault, falling back to .env."""
+    try:
+        from env_vault import load_vault
+        if load_vault():
+            return
+    except Exception:
+        pass
+    # Fallback: plain .env
     if not _ENV_FILE.exists():
         return
     try:
         from dotenv import load_dotenv
         load_dotenv(_ENV_FILE)
     except ImportError:
-        # Manual fallback
         for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -194,29 +203,53 @@ def _generate_report(ctx: dict, out_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 # Notification (optional WhatsApp via Openclaw gateway)
 # ---------------------------------------------------------------------------
-def _notify(summary: str) -> None:
-    """Send a short summary via Openclaw gateway."""
-    import urllib.request
-    import urllib.error
+def _notify(summary: str, media_path: str | None = None) -> bool:
+    """Send a summary via Openclaw CLI. Returns True on success."""
+    import shutil
 
-    gateway_url = "http://localhost:18789/api/send"
-    payload = json.dumps({
-        "channel": "whatsapp",
-        "to": "+919866072293",
-        "message": summary,
-    }).encode("utf-8")
+    # Ensure npm global bin is on PATH (Windows npm installs go here)
+    npm_bin = Path.home() / "AppData" / "Roaming" / "npm"
+    env = os.environ.copy()
+    if npm_bin.exists():
+        env["PATH"] = str(npm_bin) + os.pathsep + env.get("PATH", "")
 
-    req = urllib.request.Request(
-        gateway_url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    # Openclaw only allows media from its workspace directory
+    oc_workspace = Path.home() / ".openclaw" / "workspace"
+    send_media: str | None = None
+    if media_path and Path(media_path).is_file() and oc_workspace.exists():
+        dest = oc_workspace / Path(media_path).name
+        shutil.copy2(media_path, dest)
+        send_media = str(dest)
+
+    # On Windows, npm installs .cmd shims — subprocess needs shell=True
+    # or the explicit .cmd extension to find them.
+    oc_bin = "openclaw.cmd" if sys.platform == "win32" else "openclaw"
+    cmd = [
+        oc_bin, "message", "send",
+        "--channel", "whatsapp",
+        "--target", "+919866072293",
+        "--message", summary,
+    ]
+    if send_media:
+        cmd.extend(["--media", send_media])
+    ok = False
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            log.info("Notification sent (status %d)", resp.status)
-    except (urllib.error.URLError, OSError) as exc:
-        log.warning("Notification failed (non-fatal): %s", exc)
+        subprocess.run(cmd, timeout=30, check=True,
+                       capture_output=True, text=True, env=env)
+        log.info("Notification sent via Openclaw CLI")
+        ok = True
+    except FileNotFoundError:
+        log.warning("Notification failed (non-fatal): openclaw CLI not found")
+    except subprocess.TimeoutExpired:
+        log.warning("Notification failed (non-fatal): openclaw CLI timed out")
+    except subprocess.CalledProcessError as exc:
+        log.warning("Notification failed (non-fatal): %s — %s",
+                     exc.returncode, exc.stderr[:200] if exc.stderr else "")
+    finally:
+        # Clean up copied media
+        if send_media and Path(send_media).exists():
+            Path(send_media).unlink(missing_ok=True)
+    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +344,14 @@ def phase_analyze(data_path: str, candidate: dict) -> dict:
     qr_text = quality_commentary(qr)
     trace.log_step("quality", "Data quality report", {}, qr_text[:200])
 
-    # Correlations
-    top_corr = top_correlations(df)
-    n_correlations = len(top_corr) if top_corr is not None and not (hasattr(top_corr, 'empty') and top_corr.empty) else 0
+    # Correlations (need at least 2 numeric columns)
+    numeric_cols = df.select_dtypes(include="number").columns
+    if len(numeric_cols) >= 2:
+        top_corr = top_correlations(df)
+        n_correlations = len(top_corr) if top_corr is not None and not (hasattr(top_corr, 'empty') and top_corr.empty) else 0
+    else:
+        top_corr = None
+        n_correlations = 0
     trace.log_step("correlations", "Top correlations", {}, f"{n_correlations} strong correlations")
 
     # Outliers
@@ -403,18 +441,38 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
                    {"n_features": len(feature_names), "n_rows": len(X)},
                    f"{len(feature_names)} features, {len(X)} rows")
 
-    # 3. Run experiment loop
+    # 3. Run research project (4-phase orchestrator) with fallback to experiment loop
     try:
-        result = run_experiment_loop(
-            X, y, feature_names, task_type=task_type, max_trials=8,
-            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
-            domain_ctx=domain_ctx,
+        from hooks.research_orchestrator import run_research_project
+        result = run_research_project(
+            df, col_classes, domain_ctx,
+            target_col=target_col,
+            max_iterations=3,
+            budget_limit={"max_trials": 15, "max_seconds": 300},
             out_dir=day_dir,
-            n_rounds=2,
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
         )
+        log.info("Phase 3b — research orchestrator completed "
+                 "(iterations=%s, stop=%s)",
+                 result.get("trace", {}).get("iterations", "?"),
+                 result.get("trace", {}).get("stop_reason", "?"))
+    except ImportError:
+        log.info("Phase 3b — research_orchestrator not available, falling back to experiment loop")
+        try:
+            result = run_experiment_loop(
+                X, y, feature_names, task_type=task_type, max_trials=8,
+                anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                domain_ctx=domain_ctx,
+                out_dir=day_dir,
+                n_rounds=2,
+            )
+        except Exception as exc:
+            log.error("Phase 3b — experiment loop failed: %s", exc)
+            trace.log_step("ml_loop", "ML experiment loop", {}, f"FAILED: {exc}")
+            return None
     except Exception as exc:
-        log.error("Phase 3b — experiment loop failed: %s", exc)
-        trace.log_step("ml_loop", "ML experiment loop", {}, f"FAILED: {exc}")
+        log.error("Phase 3b — research orchestrator failed: %s", exc)
+        trace.log_step("ml_loop", "ML research project", {}, f"FAILED: {exc}")
         return None
 
     # 4. Log each trial + best as insight
@@ -434,6 +492,11 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
             method="ml_experiment",
             confidence="high" if result["incumbent_metric"] > 0.5 else "medium",
             columns_used=target_col,
+            source_hook="ml_experiment",
+            rows_analyzed=len(analysis["df"]),
+            total_rows=len(analysis["df"]),
+            caveats="",
+            sql_equivalent="",
         )
         trace.log_insight(card)
 
@@ -585,24 +648,199 @@ def phase_track(tracking: dict, candidate: dict, domain: str) -> None:
     log.info("Phase 7 DONE — tracking updated (%d slugs)", len(tracking))
 
 
-def phase_notify(candidate: dict, domain: str, quality_score: float, n_insights: int,
+def _generate_summary_chart(ml_result: dict | None, day_dir: Path) -> Path | None:
+    """Generate a summary chart PNG for WhatsApp notification."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    chart_path = day_dir / "summary_chart.png"
+
+    try:
+        if ml_result and ml_result.get("best_trial") and ml_result["best_trial"].get("metrics"):
+            # Bar chart of model performance
+            metric_name = ml_result.get("primary_metric", "score")
+            trials = ml_result.get("trials", [])
+            scored = [
+                t for t in trials
+                if t.get("status") == "keep" and t.get("metrics", {}).get(metric_name) is not None
+            ]
+            if scored:
+                scored.sort(key=lambda t: t["metrics"][metric_name], reverse=True)
+                top = scored[:8]
+                models = [t["metrics"].get("Model", t.get("model", "?")) for t in top]
+                scores = [float(t["metrics"][metric_name]) for t in top]
+
+                fig, ax = plt.subplots(figsize=(7, max(3, len(models) * 0.5)))
+                bars = ax.barh(models[::-1], scores[::-1], color="#4C72B0")
+                ax.set_xlabel(metric_name)
+                ax.set_title("Model Performance")
+                ax.bar_label(bars, fmt="%.3f", padding=3)
+                fig.tight_layout()
+                fig.savefig(chart_path, dpi=120)
+                plt.close(fig)
+                log.info("Summary chart saved: %s", chart_path)
+                return chart_path
+
+        # Fallback: status breakdown (crashed / keep / discard)
+        if ml_result and ml_result.get("trials"):
+            trials = ml_result["trials"]
+            statuses: dict[str, int] = {}
+            for t in trials:
+                s = t.get("status", "unknown")
+                statuses[s] = statuses.get(s, 0) + 1
+
+            labels = list(statuses.keys())
+            counts = list(statuses.values())
+            colors = {"keep": "#4C72B0", "discard": "#DD8452", "crash": "#C44E52"}
+            bar_colors = [colors.get(l, "#999999") for l in labels]
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            bars = ax.barh(labels, counts, color=bar_colors)
+            ax.set_xlabel("Trial count")
+            ax.set_title("ML Trial Status Breakdown")
+            ax.bar_label(bars, padding=3)
+
+            # Add annotation if all crashed
+            if all(t.get("status") == "crash" for t in trials):
+                ax.annotate("All trials crashed", xy=(0.5, 0.02),
+                            xycoords="axes fraction", ha="center",
+                            fontsize=10, color="#C44E52", weight="bold")
+
+            fig.tight_layout()
+            fig.savefig(chart_path, dpi=120)
+            plt.close(fig)
+            log.info("Summary chart (status breakdown) saved: %s", chart_path)
+            return chart_path
+
+    except Exception as exc:
+        log.warning("Chart generation failed (non-fatal): %s", exc)
+
+    return None
+
+
+def _render_email_body(dataset_name: str, summary: str, chart_path: Path | None) -> str:
+    """Build an HTML email body for the Kaggle Daily digest."""
+    chart_note = ""
+    if chart_path and chart_path.is_file():
+        chart_note = "<p><em>Chart attached.</em></p>"
+
+    # Escape HTML in summary lines
+    lines = summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").split("\n")
+    body_lines = "".join(f"<tr><td style='padding:2px 8px'>{ln}</td></tr>" for ln in lines)
+
+    return (
+        "<html><body style='font-family:Consolas,monospace;font-size:13px'>"
+        f"<h2>Kaggle Daily &mdash; {dataset_name}</h2>"
+        f"<table>{body_lines}</table>"
+        f"{chart_note}"
+        "</body></html>"
+    )
+
+
+def _notify_email(subject: str, body_html: str, attachment: str | None = None) -> bool:
+    """Send email via shared email_notify module. Returns True on success."""
+    try:
+        from email_notify import send_email
+        return send_email(subject, body_html, attachment_path=attachment)
+    except ImportError:
+        log.warning("email_notify module not available — email skipped")
+        return False
+    except Exception as exc:
+        log.warning("Email notification failed (non-fatal): %s", exc)
+        return False
+
+
+def phase_notify(candidate: dict, domain: str, quality_score: float,
+                 analysis: dict, ml_result: dict | None,
+                 improvement_text: str, chart_path: Path | None,
                  do_notify: bool) -> None:
-    """Phase 8: Optional WhatsApp notification."""
+    """Phase 8: Optional notification — WhatsApp first, email fallback."""
     if not do_notify:
         return
 
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = analysis["rows"]
+    cols = analysis["cols"]
+    n_anomalies = analysis["n_anomalies"]
+    insights = analysis["insights"]
+    what_ifs = analysis["what_ifs"]
+
+    # Line 5: top insights (abbreviated)
+    if insights:
+        top_findings = "; ".join(
+            c.finding[:60] for c in insights[:2]
+        )
+    else:
+        top_findings = "none"
+
+    # Line 6: experiments
+    if ml_result and ml_result.get("best_trial"):
+        best = ml_result["best_trial"]
+        metric_name = ml_result.get("primary_metric", "score")
+        metric_val = best.get("metrics", {}).get(metric_name, "N/A")
+        model_name = best.get("metrics", {}).get("Model", "unknown")
+        n_trials = len(ml_result.get("trials", []))
+        exp_line = f"Experiments: {n_trials} trials - best {model_name} ({metric_name}={metric_val})"
+    elif ml_result:
+        n_trials = len(ml_result.get("trials", []))
+        exp_line = f"Experiments: {n_trials} trials - all crashed"
+    else:
+        exp_line = "Experiments: none run"
+
+    # Line 7: LLM proposals
+    if ml_result and ml_result.get("llm_hypotheses"):
+        hyp_line = f"LLM proposals: {len(ml_result['llm_hypotheses'])} hypotheses generated"
+    else:
+        hyp_line = "LLM proposals: none"
+
+    # Line 8: what-if suggestions
+    if what_ifs:
+        wi_texts = [w.get("suggestion", w.get("scenario", ""))[:40] for w in what_ifs[:2]]
+        wi_line = f"What-if: {'; '.join(wi_texts)}"
+    else:
+        wi_line = "What-if: none"
+
+    # Line 9: learnings
+    if improvement_text and improvement_text.strip():
+        learn_line = f"Learnings: {improvement_text.strip()[:80]}"
+    else:
+        learn_line = "Learnings: none"
+
     summary = (
-        f"Kaggle Daily Analysis complete.\n"
+        f"Kaggle Daily | {today}\n"
         f"Dataset: {candidate['title']}\n"
-        f"Domain: {domain}\n"
-        f"Quality: {quality_score:.0f}/100\n"
-        f"Insights: {n_insights}"
+        f"Domain: {domain} | Quality: {quality_score:.0f}/100\n"
+        f"Rows: {rows:,} | Cols: {cols} | Anomalies: {n_anomalies}\n"
+        f"Findings: {top_findings}\n"
+        f"{exp_line}\n"
+        f"{hyp_line}\n"
+        f"{wi_line}\n"
+        f"{learn_line}\n"
+        f"Full report saved locally"
     )
-    try:
-        _notify(summary)
-        log.info("Phase 8 DONE — notification sent")
-    except Exception as exc:
-        log.warning("Phase 8 — notification failed (non-fatal): %s", exc)
+
+    # ASCII-safe
+    summary = summary.encode("ascii", errors="replace").decode("ascii")
+
+    # Try WhatsApp first
+    wa_ok = _notify(summary, str(chart_path) if chart_path else None)
+
+    # Email fallback (always attempt if WhatsApp failed)
+    if not wa_ok:
+        subject = f"Kaggle Daily | {today} | {candidate['title'][:40]}"
+        body = _render_email_body(
+            candidate["title"], summary,
+            chart_path,
+        )
+        att = str(chart_path) if chart_path and chart_path.is_file() else None
+        email_ok = _notify_email(subject, body, att)
+        if email_ok:
+            log.info("Phase 8 — email fallback sent")
+        else:
+            log.warning("Phase 8 — both WhatsApp and email failed")
+
+    log.info("Phase 8 DONE")
 
 
 # ---------------------------------------------------------------------------
@@ -705,8 +943,10 @@ def main() -> int:
     # Phase 7: Track
     phase_track(tracking, candidate, domain)
 
-    # Phase 8: Notify
-    phase_notify(candidate, domain, avg_quality, len(analysis["insights"]), args.notify)
+    # Phase 8: Chart + Notify
+    chart_path = _generate_summary_chart(ml_result, day_dir)
+    phase_notify(candidate, domain, avg_quality, analysis, ml_result,
+                 improvement_text, chart_path, args.notify)
 
     log.info("=== Pipeline complete — %s ===", candidate["slug"])
     print(f"\nDone. Report: {report_path}")

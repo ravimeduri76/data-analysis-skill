@@ -1,4 +1,4 @@
-"""Unified LLM client — routes through Groq (primary) or Anthropic (fallback).
+"""Unified LLM client — routes through Groq → OpenAI → Anthropic.
 
 All hooks should call ``call_llm()`` instead of directly importing anthropic/openai.
 """
@@ -15,11 +15,14 @@ log = logging.getLogger(__name__)
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
+# OpenAI settings
+_OPENAI_MODEL = "gpt-4o"
+
 # Anthropic fallback
 _ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # Degradation tracking — set by call_llm, read by orchestrator
-last_fallback_used: Optional[str] = None  # 'anthropic' | 'none_available' | None
+last_fallback_used: Optional[str] = None  # 'openai' | 'anthropic' | 'none_available' | None
 
 
 def call_llm(
@@ -31,9 +34,10 @@ def call_llm(
     """Send a prompt to the best available LLM and return the text response.
 
     Resolution order:
-      1. GROQ_API_KEY  → OpenAI-compatible endpoint (Llama 3.3 70B)
-      2. ANTHROPIC_API_KEY → Anthropic Messages API (Claude Sonnet)
-      3. Neither set → return None
+      1. GROQ_API_KEY   → OpenAI-compatible endpoint (Llama 3.3 70B)
+      2. LLM_API_KEY    → OpenAI API (GPT-4o)
+      3. ANTHROPIC_API_KEY → Anthropic Messages API (Claude Sonnet)
+      4. None set → return None
 
     Parameters
     ----------
@@ -42,9 +46,9 @@ def call_llm(
     max_tokens : int
         Maximum tokens in the response.
     system : str | None
-        Optional system message (used by execution_graph).
+        Optional system message.
     expect_json : bool
-        If True, requests structured JSON output (Groq ``response_format``).
+        If True, requests structured JSON output (``response_format``).
 
     Returns
     -------
@@ -55,6 +59,7 @@ def call_llm(
     last_fallback_used = None
 
     groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    openai_key = os.environ.get("LLM_API_KEY", "").strip()
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
     # ── Try Groq first ────────────────────────────────────────────────────
@@ -82,7 +87,35 @@ def call_llm(
                 return text.strip()
             return None
         except Exception as exc:
-            log.warning("Groq call failed (%s), trying Anthropic fallback", exc)
+            log.warning("Groq call failed (%s), trying OpenAI fallback", exc)
+            last_fallback_used = "openai"
+
+    # ── OpenAI fallback ───────────────────────────────────────────────────
+    if openai_key:
+        try:
+            from openai import OpenAI
+
+            client_o = OpenAI(api_key=openai_key)
+            messages_o: list[dict] = []
+            if system:
+                messages_o.append({"role": "system", "content": system})
+            messages_o.append({"role": "user", "content": prompt})
+
+            kwargs_o: dict = dict(
+                model=_OPENAI_MODEL,
+                max_tokens=max_tokens,
+                messages=messages_o,
+            )
+            if expect_json:
+                kwargs_o["response_format"] = {"type": "json_object"}
+
+            resp_o = client_o.chat.completions.create(**kwargs_o)
+            text_o = resp_o.choices[0].message.content
+            if text_o:
+                return text_o.strip()
+            return None
+        except Exception as exc:
+            log.warning("OpenAI call failed (%s), trying Anthropic fallback", exc)
             last_fallback_used = "anthropic"
 
     # ── Anthropic fallback ────────────────────────────────────────────────
@@ -107,6 +140,6 @@ def call_llm(
         except Exception as exc:
             log.warning("Anthropic call failed: %s", exc)
 
-    log.info("No LLM API key available (GROQ_API_KEY / ANTHROPIC_API_KEY)")
+    log.info("No LLM API key available (GROQ_API_KEY / LLM_API_KEY / ANTHROPIC_API_KEY)")
     last_fallback_used = "none_available"
     return None

@@ -1,0 +1,11 @@
+{
+  "solution_id": "probus",
+  "app_id": "careaxl",
+  "name": "Probus",
+  "description": "Healthcare operations module — data pipeline, analytics, and workflow management for clinical operations",
+  "modules": ["data_pipeline", "analytics", "workflow"],
+  "primary_agents": ["AG04", "AG06", "AG07", "AG14", "AG36"],
+  "execution_plans": ["probus_analytics_pipeline"],
+  "intent_patterns": ["probus", "clinical operations", "healthcare analytics", "patient operations", "clinical pipeline"],
+  "domains": ["Healthcare"]
+}

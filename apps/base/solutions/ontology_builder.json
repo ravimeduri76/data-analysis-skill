@@ -1,0 +1,11 @@
+{
+  "solution_id": "ontology_builder",
+  "app_id": "base",
+  "name": "Ontology Builder",
+  "description": "Build and maintain domain ontologies — data pipelines, schema libraries, and knowledge graph construction",
+  "modules": ["data_pipeline", "schema_library", "knowledge_builder"],
+  "primary_agents": ["AG04", "AG07", "AG08", "AG23", "AG24"],
+  "execution_plans": ["ontology_build_pipeline"],
+  "intent_patterns": ["build ontology", "create domain model", "schema library", "knowledge graph"],
+  "domains": ["Any"]
+}

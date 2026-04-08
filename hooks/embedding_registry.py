@@ -23,6 +23,26 @@ _MODEL_NAME = "BAAI/bge-m3"
 _MODEL_CACHE: dict = {}
 
 
+def _load_hf_token() -> None:
+    """Set HF_TOKEN in environment from .env if not already present."""
+    if os.environ.get("HF_TOKEN"):
+        return
+    env_path = os.path.join(
+        os.path.expanduser("~"), "Data_Analysis", ".env"
+    )
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("HF_TOKEN=") and len(line) > 9:
+                    os.environ["HF_TOKEN"] = line.split("=", 1)[1].strip()
+                    return
+    except OSError:
+        pass
+
+
 def get_embed_model():
     """Load BGE-M3 model (cached singleton). Returns None if unavailable."""
     if "model" not in _MODEL_CACHE:
@@ -30,9 +50,13 @@ def get_embed_model():
             from sentence_transformers import SentenceTransformer
             import warnings
             os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+            _load_hf_token()
+            token = os.environ.get("HF_TOKEN") or None
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                _MODEL_CACHE["model"] = SentenceTransformer(_MODEL_NAME)
+                _MODEL_CACHE["model"] = SentenceTransformer(
+                    _MODEL_NAME, token=token
+                )
         except Exception:
             _MODEL_CACHE["model"] = None
     return _MODEL_CACHE["model"]

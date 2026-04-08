@@ -1,0 +1,11 @@
+{
+  "solution_id": "product_data_syndication",
+  "app_id": "dataaxl",
+  "name": "Product Data Syndication",
+  "description": "Distribute product data to retail and marketplace endpoints — Amazon, GDSN, Walmart",
+  "modules": ["amazon_endpoint", "gdsn_endpoint", "walmart_endpoint"],
+  "primary_agents": ["AG04", "AG34", "AG35"],
+  "execution_plans": ["product_syndication_pipeline"],
+  "intent_patterns": ["product syndication", "amazon feed", "gdsn publish", "walmart feed", "syndicate product", "distribute product data"],
+  "domains": ["Commercial / Industrial"]
+}

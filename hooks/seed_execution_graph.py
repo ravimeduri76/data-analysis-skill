@@ -1,6 +1,6 @@
 """
-seed_execution_graph.py — Seed the execution graph with agent cards (AG01-AG39),
-plan templates (~16), steps, dependencies, and few-shot examples (~20).
+seed_execution_graph.py — Seed the execution graph with agent cards (AG01-AG40),
+plan templates (~17), steps, dependencies, and few-shot examples (~21).
 
 Run once (or re-run idempotently — all inserts use ON CONFLICT DO UPDATE):
 
@@ -10,9 +10,9 @@ After seeding, embeddings are generated automatically via backfill_execution_emb
 
 Coverage
 --------
-  Agent cards      : 39  (AG01-AG39)
-  Plan templates   : 16
-  Few-shot examples: 20
+  Agent cards      : 40  (AG01-AG40)
+  Plan templates   : 17
+  Few-shot examples: 21
 
 Agent categories
 ----------------
@@ -33,6 +33,7 @@ Agent categories
   Publishing        : AG34 (Catalog Manager), AG35 (Syndicator)
   Analytics         : AG36 (Data Analysis), AG37 (RAG Agent), AG38 (Search)
   Operations        : AG39 (FinOps)
+  Research          : AG40 (ResearchOrchestrator)
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ from execution_graph import (
 )
 
 # ---------------------------------------------------------------------------
-# Agent Cards: AG01–AG39
+# Agent Cards: AG01–AG40
 # ---------------------------------------------------------------------------
 
 AGENT_CARDS = [
@@ -634,6 +635,21 @@ AGENT_CARDS = [
         "hitl_required": False,
         "notes": "Cross-cutting agent. Can be added to any plan for cost tracking and optimization.",
     },
+    # ── Research ──────────────────────────────────────────────────────────
+    {
+        "agent_id": "AG40",
+        "name": "ResearchOrchestrator",
+        "type_": "cognitive",
+        "lifecycle_stage": "ml_modeling",
+        "domain": "Any",
+        "capability": "Structured 4-phase ML research (Understand, Design, Prioritize, Execute) across 7 improvement surfaces: Data, Features, Architectures, Models, Parameters, Validation, Interpretation. Multi-iteration self-stopping. Produces research_project.md and populates experiment ledger.",
+        "skill_workflow": "research_orchestrator SKILL.md (6-step protocol)",
+        "ingress_schema": {"dataset": "DataFrame or path", "domain_ctx": "DCP", "intent_spec": "IS", "target_col": "str (optional)", "budget": "dict (optional)"},
+        "egress_schema": {"research_result": "dict", "stop_reason": "str", "research_project_md": "str path", "research_summary": "str"},
+        "runtime_hint": "async",
+        "hitl_required": False,
+        "notes": "Has 4 sub-agents (RA1-RA4) and L3 experiment ledger. Invocable as /research skill or by SA3. Wraps hooks/research_orchestrator.py.",
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -846,6 +862,20 @@ PLANS = [
             "knowledge_base", "question_answering",
         ],
         "lifecycle_stages": ["enrichment", "analytics"],
+        "domains": ["Any"],
+        "requires_dataset": True,
+    },
+    # 17. Research Experiment Pipeline
+    {
+        "name": "research_experiment_pipeline",
+        "label": "Research Experiment Pipeline",
+        "description": "Structured ML research: fetch data, profile, then run 4-phase research orchestrator (Understand, Design across 7 surfaces, Prioritize, Execute with stopping). Produces research_project.md and experiment ledger.",
+        "intent_patterns": [
+            "ml_research", "experiment_protocol", "hypothesis_testing",
+            "optimize_model", "systematic_tuning", "research_project",
+            "iterative_improvement", "multi_surface_optimization",
+        ],
+        "lifecycle_stages": ["ml_modeling", "analytics"],
         "domains": ["Any"],
         "requires_dataset": True,
     },
@@ -1110,6 +1140,17 @@ STEPS = [
     ("semantic_search_setup", 3, "AG38", "Enable search interface",
      {"rag_index": "$step.2.egress.rag_index"},
      ["results", "relevance_scores"], False, None, None, None),
+
+    # ── 17. research_experiment_pipeline: AG04 → AG07 → AG40
+    ("research_experiment_pipeline", 1, "AG04", "Fetch dataset for research",
+     {"source_config": "$input.source_config"}, ["dataset", "metadata"], False, None, None, None),
+    ("research_experiment_pipeline", 2, "AG07", "Full profiling to understand data landscape",
+     {"dataset": "$step.1.egress.dataset", "domain_ctx": "$input.dcp"},
+     ["profile_report", "column_profiles", "col_classes"], False, None, None, None),
+    ("research_experiment_pipeline", 3, "AG40", "Run 4-phase research orchestrator (multi-iteration, self-stopping)",
+     {"dataset": "$step.1.egress.dataset", "domain_ctx": "$input.dcp", "intent_spec": "$input.is",
+      "col_classes": "$step.2.egress.col_classes", "budget": "$input.budget"},
+     ["research_result", "stop_reason", "research_project_md", "research_summary"], False, None, None, None),
 ]
 
 # ---------------------------------------------------------------------------
@@ -1214,6 +1255,10 @@ DEPENDENCIES = [
     # semantic_search_setup
     ("semantic_search_setup", "AG04", "AG37", 1, 2, "data", "RAG needs data"),
     ("semantic_search_setup", "AG37", "AG38", 2, 3, "data", "Search needs RAG index"),
+
+    # research_experiment_pipeline
+    ("research_experiment_pipeline", "AG04", "AG07", 1, 2, "data", "Profiler needs fetched data"),
+    ("research_experiment_pipeline", "AG07", "AG40", 2, 3, "data", "Research orchestrator needs profiling + col_classes"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -1661,6 +1706,25 @@ EXAMPLES = [
                 {"agent_id": "AG39", "step_order": 10, "purpose": "Track total pipeline cost: MDM + enrichment + syndication", "is_optional": True},
             ],
         },
+    },
+    # ── 21. RESEARCH — optimize churn model across surfaces ───────────────
+    {
+        "example_name": "optimize_churn_model_research",
+        "intent_context": {
+            "matched_node": {"name": "ml_research", "label": "ML Research", "level": "specific"},
+            "confidence": 0.90,
+            "abstract_parents": [{"name": "predictive_modeling", "label": "Predictive Modeling"}],
+            "requires_clarification": False,
+        },
+        "domain_context": {
+            "domain": "Healthcare",
+            "query_has_dataset": True,
+            "graph_available": False,
+            "user_query": "Optimize our churn prediction model systematically — try different features, models, ensembles, and hyperparameters. I want a structured research project, not just a quick model run.",
+        },
+        "selected_plan": "research_experiment_pipeline",
+        "reasoning": "User explicitly requests structured research across multiple surfaces (features, models, ensembles, hyperparameters). research_experiment_pipeline: AG04 (fetch churn data) -> AG07 (full profile to understand features and target distribution) -> AG40 (4-phase research: Understand → Design 8-15 experiments across 7 surfaces → Prioritize by impact/cost → Execute with stopping criteria). AG40 is self-stopping and produces research_project.md. No HITL needed — AG40 handles iteration internally.",
+        "plan_overrides": None,
     },
 ]
 

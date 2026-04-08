@@ -39,8 +39,8 @@ add_intent_alias(conn, intent_name, alias, alias_type)     -> None
 embed_intent_nodes(conn)                                   -> int   (count embedded)
 find_candidate_intents(conn, query, limit, domain_filter,
                        app_id)                             -> list[dict]
-traverse_up(conn, node_id, max_depth)                      -> list[dict]
-traverse_down(conn, node_id, max_depth)                    -> list[dict]
+traverse_up(conn, node_id, max_depth, app_id)              -> list[dict]
+traverse_down(conn, node_id, max_depth, app_id)            -> list[dict]
 resolve_intent(conn, query, domain, app_id)                -> dict  (IntentContext)
 render_intent_context(ctx)                                 -> str   (ASCII-safe)
 backfill_intent_embeddings(conn)                           -> int
@@ -248,15 +248,8 @@ _embed_cache: dict = {}
 def _get_embed_model():
     """Load BGE-M3 (cached). Returns None if sentence-transformers unavailable."""
     if "model" not in _embed_cache:
-        try:
-            from sentence_transformers import SentenceTransformer
-            import warnings
-            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                _embed_cache["model"] = SentenceTransformer("BAAI/bge-m3")
-        except Exception:
-            _embed_cache["model"] = None
+        from hooks.embedding_registry import get_embed_model
+        _embed_cache["model"] = get_embed_model()
     return _embed_cache["model"]
 
 
@@ -494,12 +487,12 @@ def _alias_keyword_search(
 # Graph traversal
 # ---------------------------------------------------------------------------
 
-def traverse_up(conn, node_id: int, max_depth: int = 4) -> list[dict]:
+def traverse_up(conn, node_id: int, max_depth: int = 4, app_id: str = "base") -> list[dict]:
     """Walk IS_A edges upward from node_id to find all ancestor intents.
 
     If X IS_A Y, then Y is an ancestor of X.
     Returns list of ancestor dicts ordered by ascending depth (closest first),
-    with 'depth' field added.
+    with 'depth' field added.  Scoped to nodes visible to app_id (own + base).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -521,10 +514,11 @@ def traverse_up(conn, node_id: int, max_depth: int = 4) -> list[dict]:
                             MIN(a.depth) AS depth
             FROM intent_nodes n
             JOIN ancestors a ON n.id = a.node_id
+            WHERE (n.app_id = %s OR n.app_id = 'base')
             GROUP BY n.id, n.name, n.label, n.description, n.level, n.domain, n.lifecycle_stage
             ORDER BY depth ASC
             """,
-            (node_id, max_depth),
+            (node_id, max_depth, app_id),
         )
         rows = cur.fetchall()
 
@@ -543,12 +537,13 @@ def traverse_up(conn, node_id: int, max_depth: int = 4) -> list[dict]:
     ]
 
 
-def traverse_down(conn, node_id: int, max_depth: int = 4) -> list[dict]:
+def traverse_down(conn, node_id: int, max_depth: int = 4, app_id: str = "base") -> list[dict]:
     """Walk IS_A edges downward from node_id to find all descendant intents.
 
     If X IS_A Y, then X is a descendant of Y.  We traverse in reverse:
     find all nodes whose IS_A chain leads back to node_id.
     Returns list of descendant dicts ordered by ascending depth (immediate children first).
+    Scoped to nodes visible to app_id (own + base).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -570,10 +565,11 @@ def traverse_down(conn, node_id: int, max_depth: int = 4) -> list[dict]:
                             MIN(d.depth) AS depth
             FROM intent_nodes n
             JOIN descendants d ON n.id = d.node_id
+            WHERE (n.app_id = %s OR n.app_id = 'base')
             GROUP BY n.id, n.name, n.label, n.description, n.level, n.domain, n.lifecycle_stage
             ORDER BY depth ASC
             """,
-            (node_id, max_depth),
+            (node_id, max_depth, app_id),
         )
         rows = cur.fetchall()
 
@@ -625,8 +621,10 @@ def _get_related_by_predicate(conn, node_id: int, predicate: str) -> list[dict]:
     ]
 
 
-def _get_siblings(conn, node_id: int) -> list[dict]:
-    """Return intent nodes that share a direct IS_A parent with node_id."""
+def _get_siblings(conn, node_id: int, app_id: str = "base") -> list[dict]:
+    """Return intent nodes that share a direct IS_A parent with node_id.
+    Scoped to nodes visible to app_id (own + base).
+    """
     with conn.cursor() as cur:
         # Find direct parents of node_id
         cur.execute(
@@ -648,8 +646,9 @@ def _get_siblings(conn, node_id: int) -> list[dict]:
             WHERE t.predicate = 'IS_A'
               AND t.object_id IN ({placeholders})
               AND n.id != %s
+              AND (n.app_id = %s OR n.app_id = 'base')
             """,
-            parent_ids + [node_id],
+            parent_ids + [node_id, app_id],
         )
         rows = cur.fetchall()
 
@@ -825,19 +824,19 @@ def resolve_intent(
             f"Ask user to confirm which direction they need."
         )
 
-    # Graph traversal — all best-effort
+    # Graph traversal — all best-effort, scoped by app_id
     try:
-        parents = traverse_up(conn, node_id, max_depth=4)
+        parents = traverse_up(conn, node_id, max_depth=4, app_id=app_id)
     except Exception:
         parents = []
 
     try:
-        children = traverse_down(conn, node_id, max_depth=4)
+        children = traverse_down(conn, node_id, max_depth=4, app_id=app_id)
     except Exception:
         children = []
 
     try:
-        siblings = _get_siblings(conn, node_id)
+        siblings = _get_siblings(conn, node_id, app_id=app_id)
     except Exception:
         siblings = []
 
