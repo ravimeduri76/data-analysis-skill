@@ -172,6 +172,9 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "analysis_lens": "Focus on patient safety signals, readmission risk, care pathway efficiency, and compliance with clinical coding standards (ICD/CPT).",
         "anomaly_guidance": "Anomalies in healthcare data include impossible clinical values (negative ages, future dates), out-of-range vitals, duplicate encounters, and inconsistent diagnosis/procedure code combinations.",
         "key_metrics": ["readmission rate", "length of stay", "mortality rate", "claim denial rate", "medication error rate"],
+        "timeseries_lens": "Focus on patient volume trends, seasonal admission patterns, ED boarding time trends, and staffing demand cycles.",
+        "timeseries_metrics": ["daily admissions", "ED wait time trend", "bed occupancy rate", "seasonal admission index"],
+        "default_seasonal_period": 7,
     },
     "Pharmaceutical": {
         "role": "pharmaceutical data scientist with expertise in drug development, clinical trials, and regulatory data",
@@ -208,6 +211,9 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "analysis_lens": "Focus on credit quality distributions, delinquency trends, concentration risks, and model fairness signals.",
         "anomaly_guidance": "Flag impossible FICO scores (outside 300-850), negative loan amounts, DTI > 100%, future origination dates, and inconsistent loan status transitions.",
         "key_metrics": ["default rate", "delinquency rate", "average FICO", "LTV ratio", "DTI ratio", "charge-off rate"],
+        "timeseries_lens": "Focus on delinquency rate trends, vintage performance curves, portfolio growth/runoff, and early warning signals from roll-rate transitions.",
+        "timeseries_metrics": ["monthly delinquency rate", "vintage loss curve", "net charge-off trend", "origination volume trend"],
+        "default_seasonal_period": 12,
     },
     "Insurance": {
         "role": "insurance analytics specialist with expertise in underwriting, claims management, and loss modelling",
@@ -226,12 +232,18 @@ _DOMAIN_PROFILES: dict[str, dict] = {
         "analysis_lens": "Focus on sales velocity, stockout patterns, return rates, price anomalies, and customer lifetime value.",
         "anomaly_guidance": "Flag negative prices, quantities > stock levels, future order dates, returns exceeding original purchase quantity, and extreme discount rates (>100%).",
         "key_metrics": ["conversion rate", "AOV", "return rate", "inventory turnover", "sell-through %", "CLTV"],
+        "timeseries_lens": "Focus on demand forecasting, promotional lift detection, seasonal sales patterns, and inventory replenishment triggers.",
+        "timeseries_metrics": ["daily sales volume", "weekly revenue trend", "seasonal index", "forecast accuracy (MAPE)"],
+        "default_seasonal_period": 7,
     },
     "HR & People Analytics": {
         "role": "HR and people analytics specialist with expertise in workforce planning, compensation analysis, and talent management",
         "analysis_lens": "Focus on attrition signals, compensation equity, headcount trends, and performance distribution.",
         "anomaly_guidance": "Flag negative salaries, tenure < 0, performance scores outside valid range, duplicate employee IDs, and future hire dates.",
         "key_metrics": ["attrition rate", "time-to-fill", "span of control", "gender pay gap", "engagement score"],
+        "timeseries_lens": "Focus on headcount trends, attrition rate seasonality, hiring velocity, and time-to-fill trends.",
+        "timeseries_metrics": ["monthly attrition rate", "hiring volume trend", "headcount growth", "time-to-fill moving average"],
+        "default_seasonal_period": 12,
     },
     "Education": {
         "role": "education data analyst with expertise in student outcomes, curriculum effectiveness, and institutional performance",
@@ -347,6 +359,11 @@ _LIFECYCLE_STAGE_KEYWORDS: dict[str, list[str]] = {
     "survival_analysis": [
         "survival", "time to event", "churn", "kaplan meier", "hazard",
         "cox", "retention", "time to failure", "event study", "tenure",
+    ],
+    "timeseries_analysis": [
+        "forecast", "time series", "timeseries", "trend", "seasonality",
+        "arima", "sarima", "prophet", "exponential smoothing",
+        "demand forecast", "demand planning", "temporal", "temporal fusion",
     ],
 }
 

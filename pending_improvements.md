@@ -34,3 +34,11 @@
 ## 2026-04-07 05:17 UTC
 
 - [ ] Implement automated domain validation for low confidence detections
+
+## 2026-04-09 10:10 UTC
+
+- [ ] Develop a more granular workflow to account for varying social media platform usage patterns
+
+## 2026-04-10 09:07 UTC
+
+- [ ] Implement more advanced anomaly detection techniques, such as using machine learning models, to identify complex patterns in the data

@@ -201,54 +201,113 @@ def _generate_report(ctx: dict, out_dir: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Notification (optional WhatsApp via Openclaw gateway)
+# Notification (via Telegram Bot API)
 # ---------------------------------------------------------------------------
+_TG_TOKEN_FILE = Path.home() / ".claude" / "channels" / "telegram" / ".env"
+
+
+def _load_telegram_config() -> tuple[str | None, str | None]:
+    """Load Telegram bot token and chat ID from env or config file."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not token and _TG_TOKEN_FILE.is_file():
+        for line in _TG_TOKEN_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, val = line.partition("=")
+            if key.strip() == "TELEGRAM_BOT_TOKEN" and not token:
+                token = val.strip()
+            elif key.strip() == "TELEGRAM_CHAT_ID" and not chat_id:
+                chat_id = val.strip()
+
+    return token, chat_id
+
+
 def _notify(summary: str, media_path: str | None = None) -> bool:
-    """Send a summary via Openclaw CLI. Returns True on success."""
-    import shutil
+    """Send a summary via Telegram Bot API. Returns True on success.
 
-    # Ensure npm global bin is on PATH (Windows npm installs go here)
-    npm_bin = Path.home() / "AppData" / "Roaming" / "npm"
-    env = os.environ.copy()
-    if npm_bin.exists():
-        env["PATH"] = str(npm_bin) + os.pathsep + env.get("PATH", "")
+    Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from env vars or
+    ~/.claude/channels/telegram/.env. Works without a running Claude
+    Code session — ideal for unattended scheduled pipelines.
+    """
+    import urllib.request
+    import urllib.error
 
-    # Openclaw only allows media from its workspace directory
-    oc_workspace = Path.home() / ".openclaw" / "workspace"
-    send_media: str | None = None
-    if media_path and Path(media_path).is_file() and oc_workspace.exists():
-        dest = oc_workspace / Path(media_path).name
-        shutil.copy2(media_path, dest)
-        send_media = str(dest)
+    token, chat_id = _load_telegram_config()
+    if not token or not chat_id:
+        log.warning("Telegram notification skipped — TELEGRAM_BOT_TOKEN or "
+                     "TELEGRAM_CHAT_ID not configured")
+        return False
 
-    # On Windows, npm installs .cmd shims — subprocess needs shell=True
-    # or the explicit .cmd extension to find them.
-    oc_bin = "openclaw.cmd" if sys.platform == "win32" else "openclaw"
-    cmd = [
-        oc_bin, "message", "send",
-        "--channel", "whatsapp",
-        "--target", "+919866072293",
-        "--message", summary,
-    ]
-    if send_media:
-        cmd.extend(["--media", send_media])
+    base_url = f"https://api.telegram.org/bot{token}"
     ok = False
+
+    # Send text message
     try:
-        subprocess.run(cmd, timeout=30, check=True,
-                       capture_output=True, text=True, env=env)
-        log.info("Notification sent via Openclaw CLI")
-        ok = True
-    except FileNotFoundError:
-        log.warning("Notification failed (non-fatal): openclaw CLI not found")
-    except subprocess.TimeoutExpired:
-        log.warning("Notification failed (non-fatal): openclaw CLI timed out")
-    except subprocess.CalledProcessError as exc:
-        log.warning("Notification failed (non-fatal): %s — %s",
-                     exc.returncode, exc.stderr[:200] if exc.stderr else "")
-    finally:
-        # Clean up copied media
-        if send_media and Path(send_media).exists():
-            Path(send_media).unlink(missing_ok=True)
+        payload = json.dumps({
+            "chat_id": chat_id,
+            "text": summary,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{base_url}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ok = resp.status == 200
+        log.info("Telegram notification sent (text)")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:200]
+        log.warning("Telegram sendMessage failed (non-fatal): %s — %s", exc.code, body)
+    except Exception as exc:
+        log.warning("Telegram notification failed (non-fatal): %s", exc)
+
+    # Send chart as photo if available
+    if media_path and Path(media_path).is_file():
+        try:
+            import mimetypes
+            boundary = "----KaggleDailyBoundary"
+            body_parts = []
+
+            # chat_id field
+            body_parts.append(f"--{boundary}\r\n"
+                              f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                              f"{chat_id}\r\n")
+
+            # photo file
+            fname = Path(media_path).name
+            mime = mimetypes.guess_type(fname)[0] or "image/png"
+            photo_data = Path(media_path).read_bytes()
+            body_parts.append(f"--{boundary}\r\n"
+                              f'Content-Disposition: form-data; name="photo"; filename="{fname}"\r\n'
+                              f"Content-Type: {mime}\r\n\r\n")
+
+            body_bytes = b""
+            for part in body_parts[:-1]:
+                body_bytes += part.encode("utf-8")
+            # Last text part (before binary)
+            body_bytes += body_parts[-1].encode("utf-8")
+            body_bytes += photo_data
+            body_bytes += f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+            req = urllib.request.Request(
+                f"{base_url}/sendPhoto",
+                data=body_bytes,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                pass
+            log.info("Telegram notification sent (photo)")
+        except Exception as exc:
+            log.warning("Telegram photo send failed (non-fatal): %s", exc)
+
     return ok
 
 
@@ -532,6 +591,197 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
     return result
 
 
+def phase_timeseries(analysis: dict, day_dir: Path, candidate: dict) -> Optional[dict]:
+    """Phase 3c: Time-series analysis (Workflow F)."""
+    try:
+        import pandas as pd
+        import numpy as np
+        from hooks.timeseries_prep import detect_time_index, detect_seasonality, gp_gap_fill, ts_outlier_treatment
+        from hooks.timeseries_models import (
+            fit_exponential_smoothing, fit_arima, compare_models, forecast,
+            timeseries_summary, _STATSMODELS_OK, _PROPHET_OK,
+        )
+        from hooks.timeseries_viz import (
+            plot_decomposition, plot_forecast, plot_model_comparison,
+            plot_residual_diagnostics, plot_gap_fill, plot_stationarity,
+        )
+    except ImportError:
+        log.warning("Phase 3c — timeseries hooks not available, skipping")
+        return None
+
+    df = analysis["df"]
+    domain_ctx = analysis["domain_ctx"]
+    trace = analysis["trace"]
+
+    # 1. Detect time index
+    ts_config = detect_time_index(df, domain_ctx=domain_ctx)
+    if not ts_config.time_col:
+        log.info("Phase 3c — no time column detected, skipping time-series")
+        trace.log_step("ts_detect", "Time index detection", {}, "No time column found")
+        return None
+
+    # 2. Check minimum requirements
+    if ts_config.n_observations < 30:
+        log.info("Phase 3c — only %d observations (need 30+), skipping", ts_config.n_observations)
+        trace.log_step("ts_detect", "Time index detection", {},
+                       f"Insufficient observations: {ts_config.n_observations}")
+        return None
+
+    if ts_config.gap_pct >= 50.0:
+        log.info("Phase 3c — gap_pct=%.1f%% (>50%%), skipping", ts_config.gap_pct)
+        trace.log_step("ts_detect", "Time index detection", {},
+                       f"Too many gaps: {ts_config.gap_pct}%")
+        return None
+
+    trace.log_step("ts_detect", "Time index detection",
+                   {"time_col": ts_config.time_col, "freq": ts_config.freq},
+                   f"{ts_config.n_observations} obs, freq={ts_config.freq}, gaps={ts_config.n_gaps}")
+
+    # 3. Prepare series
+    time_col = ts_config.time_col
+    value_cols = ts_config.value_cols[:1]  # use first numeric column
+    if not value_cols:
+        log.info("Phase 3c — no numeric value column, skipping")
+        return None
+
+    value_col = value_cols[0]
+    ts_df = df[[time_col, value_col]].copy()
+    ts_df[time_col] = pd.to_datetime(ts_df[time_col], errors="coerce")
+    ts_df = ts_df.dropna(subset=[time_col]).sort_values(time_col).reset_index(drop=True)
+    series = ts_df[value_col].copy()
+    time_index = pd.DatetimeIndex(ts_df[time_col])
+
+    out_dir = str(day_dir)
+    plots = []
+
+    # 4. Gap fill
+    gap_result = None
+    if ts_config.n_gaps > 0:
+        try:
+            gap_result = gp_gap_fill(series, time_index)
+            series = gap_result.filled_series
+            trace.log_step("ts_gap_fill", "Gap filling", {"method": gap_result.method},
+                           f"{gap_result.n_gaps_filled} gaps filled")
+            plots.append(plot_gap_fill(ts_df[value_col], gap_result, out_dir))
+        except Exception as exc:
+            log.warning("Phase 3c — gap fill failed: %s", exc)
+
+    # 5. Outlier treatment
+    try:
+        series, outlier_flags = ts_outlier_treatment(series)
+        n_outliers = int(outlier_flags.sum())
+        trace.log_step("ts_outliers", "Outlier treatment", {},
+                       f"{n_outliers} outliers treated")
+    except Exception as exc:
+        log.warning("Phase 3c — outlier treatment failed: %s", exc)
+
+    # 6. Seasonality detection
+    try:
+        seasonality = detect_seasonality(series, ts_config.freq)
+        trace.log_step("ts_seasonality", "Seasonality detection",
+                       {"period": seasonality.period, "strength": seasonality.strength},
+                       f"period={seasonality.period}, strength={seasonality.strength}, type={seasonality.seasonal_type}")
+        plots.append(plot_decomposition(series, time_index, seasonality, out_dir))
+    except Exception as exc:
+        log.warning("Phase 3c — seasonality detection failed: %s", exc)
+        from hooks.timeseries_prep import SeasonalityInfo
+        seasonality = SeasonalityInfo(period=1, strength=0, seasonal_type="additive",
+                                      method="none", confidence="low")
+
+    # 7. Fit classical models
+    results = {}
+    clean_series = series.dropna()
+
+    if _STATSMODELS_OK and len(clean_series) >= 4:
+        # Exponential Smoothing
+        try:
+            sp = seasonality.period if seasonality.period > 1 and len(clean_series) >= 2 * seasonality.period else None
+            es_result = fit_exponential_smoothing(clean_series, seasonal_periods=sp)
+            results["ExponentialSmoothing"] = es_result
+            trace.log_step("ts_es", "Exponential Smoothing", es_result.params,
+                           f"MAPE={es_result.metrics.get('MAPE', 'N/A')}%")
+        except Exception as exc:
+            log.warning("Phase 3c — ES failed: %s", exc)
+
+        # ARIMA
+        try:
+            if len(clean_series) >= 10:
+                arima_result = fit_arima(clean_series)
+                results["ARIMA"] = arima_result
+                trace.log_step("ts_arima", f"ARIMA{arima_result.order}",
+                               {"order": arima_result.order, "adf_p": arima_result.adf_pvalue},
+                               f"MAPE={arima_result.metrics.get('MAPE', 'N/A')}%")
+                plots.append(plot_stationarity(clean_series, arima_result, out_dir))
+        except Exception as exc:
+            log.warning("Phase 3c — ARIMA failed: %s", exc)
+
+    # Prophet
+    if _PROPHET_OK and len(ts_df) >= 10:
+        try:
+            from hooks.timeseries_models import fit_prophet
+            prophet_result = fit_prophet(ts_df, time_col, value_col, domain_ctx=domain_ctx)
+            results["Prophet"] = prophet_result
+            trace.log_step("ts_prophet", "Prophet", {},
+                           f"MAPE={prophet_result.metrics.get('MAPE', 'N/A')}%")
+        except Exception as exc:
+            log.warning("Phase 3c — Prophet failed: %s", exc)
+
+    if not results:
+        log.info("Phase 3c — no models fitted successfully")
+        return None
+
+    # 8. Compare models + forecast
+    comparison = compare_models(results)
+    trace.log_step("ts_compare", "Model comparison", {},
+                   f"Best: {comparison.best_model_name}")
+
+    plots.append(plot_model_comparison(comparison, out_dir))
+
+    # Forecast 10% of series length, min 5, max 30
+    horizon = max(5, min(30, len(clean_series) // 10))
+    try:
+        fcast = forecast(comparison.best_model_result, horizon=horizon)
+        trace.log_step("ts_forecast", "Forecast",
+                       {"horizon": horizon, "model": fcast.model_name},
+                       f"{horizon}-period forecast generated")
+        plots.append(plot_forecast(clean_series, fcast, out_dir))
+    except Exception as exc:
+        log.warning("Phase 3c — forecast failed: %s", exc)
+        fcast = None
+
+    # Residual diagnostics for best model
+    try:
+        plots.append(plot_residual_diagnostics(comparison.best_model_result, out_dir))
+    except Exception as exc:
+        log.warning("Phase 3c — residual plot failed: %s", exc)
+
+    # Summary
+    summary = timeseries_summary(ts_config, comparison, fcast, domain_ctx)
+    trace.log_step("ts_summary", "Time series summary", {}, summary[:200])
+
+    # Explainability
+    try:
+        from hooks.explainability import explain_timeseries
+        ts_insights = explain_timeseries(ts_config, comparison, fcast, domain_ctx, len(df))
+        for card in ts_insights:
+            trace.log_insight(card)
+        analysis["insights"].extend(ts_insights)
+    except Exception as exc:
+        log.warning("Phase 3c — explain_timeseries failed: %s", exc)
+
+    log.info("Phase 3c DONE — best=%s, %d plots", comparison.best_model_name, len(plots))
+
+    return {
+        "ts_config": ts_config,
+        "seasonality": seasonality,
+        "comparison": comparison,
+        "forecast": fcast,
+        "summary": summary,
+        "plots": plots,
+        "gap_result": gap_result,
+    }
+
+
 def phase_persist(analysis: dict) -> Optional[str]:
     """Phase 4: Save to PostgreSQL."""
     try:
@@ -575,6 +825,8 @@ def phase_persist(analysis: dict) -> Optional[str]:
         if analysis.get("ml_result"):
             workflows.append("E")
             a_type = "ml_experiment"
+        if analysis.get("ts_result"):
+            workflows.append("F")
 
         run_id = save_run(
             conn=conn,
@@ -755,7 +1007,7 @@ def phase_notify(candidate: dict, domain: str, quality_score: float,
                  analysis: dict, ml_result: dict | None,
                  improvement_text: str, chart_path: Path | None,
                  do_notify: bool) -> None:
-    """Phase 8: Optional notification — WhatsApp first, email fallback."""
+    """Phase 8: Optional notification — Claude Channels first, email fallback."""
     if not do_notify:
         return
 
@@ -823,11 +1075,11 @@ def phase_notify(candidate: dict, domain: str, quality_score: float,
     # ASCII-safe
     summary = summary.encode("ascii", errors="replace").decode("ascii")
 
-    # Try WhatsApp first
-    wa_ok = _notify(summary, str(chart_path) if chart_path else None)
+    # Try Claude Channels first
+    ch_ok = _notify(summary, str(chart_path) if chart_path else None)
 
-    # Email fallback (always attempt if WhatsApp failed)
-    if not wa_ok:
+    # Email fallback (always attempt if Channels failed)
+    if not ch_ok:
         subject = f"Kaggle Daily | {today} | {candidate['title'][:40]}"
         body = _render_email_body(
             candidate["title"], summary,
@@ -838,7 +1090,7 @@ def phase_notify(candidate: dict, domain: str, quality_score: float,
         if email_ok:
             log.info("Phase 8 — email fallback sent")
         else:
-            log.warning("Phase 8 — both WhatsApp and email failed")
+            log.warning("Phase 8 — both Claude Channels and email failed")
 
     log.info("Phase 8 DONE")
 
@@ -853,7 +1105,7 @@ def main() -> int:
     parser.add_argument("--strategy", choices=["hottest", "votes", "updated", "auto"],
                         default="auto", help="Override sort mode")
     parser.add_argument("--notify", action="store_true",
-                        help="Send WhatsApp summary via Openclaw gateway")
+                        help="Send summary via Claude Channels webhook")
     args = parser.parse_args()
 
     _setup_logging()
@@ -903,6 +1155,14 @@ def main() -> int:
     except Exception as exc:
         log.error("Phase 3b — ML experiment failed (non-fatal): %s", exc, exc_info=True)
         ml_result = None
+
+    # Phase 3c: Time-series analysis (Workflow F)
+    try:
+        ts_result = phase_timeseries(analysis, day_dir, candidate)
+        if ts_result:
+            analysis["ts_result"] = ts_result
+    except Exception as exc:
+        log.error("Phase 3c — time-series failed (non-fatal): %s", exc, exc_info=True)
 
     # Phase 4: Persist to DB
     run_id = phase_persist(analysis)

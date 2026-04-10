@@ -87,13 +87,15 @@ def _kaggle_list(sort_by: str, page: int) -> list[dict]:
             return []
         log.debug("kaggle CLI returned %d but has stdout — proceeding", result.returncode)
 
-    lines = result.stdout.strip().splitlines()
-    if len(lines) < 2:
+    # Strip warning/info lines that kaggle CLI prints to stdout
+    raw_lines = result.stdout.strip().splitlines()
+    csv_lines = [ln for ln in raw_lines if not ln.startswith(("Warning:", "Info:", "Error:"))]
+    if len(csv_lines) < 2:
         return []
 
     import csv as _csv
     import io
-    reader = _csv.DictReader(io.StringIO(result.stdout))
+    reader = _csv.DictReader(io.StringIO("\n".join(csv_lines)))
     return list(reader)
 
 
@@ -112,19 +114,59 @@ def discover_dataset(
     analyzed_slugs: set[str],
     strategy: str = "auto",
     domain_history: list[str] | None = None,
+    max_pages: int = 15,
 ) -> dict | None:
     """Find one new Kaggle dataset to analyze.
+
+    Strategy:
+    1. Try primary sort mode with domain diversity filter (up to max_pages).
+    2. If nothing found, rotate through ALL sort modes with diversity.
+    3. If still nothing, relax domain diversity and try all modes again.
 
     Returns a dict with keys: slug, title, size, url, tags, domain_hint
     or None if nothing suitable is found.
     """
-    sort_by = _sort_mode_for_today() if strategy == "auto" else strategy
+    primary_sort = _sort_mode_for_today() if strategy == "auto" else strategy
     recent_domains = set(domain_history[-3:]) if domain_history else set()
 
-    log.info("Discovering dataset (sort=%s, skip=%d slugs, recent_domains=%s)",
-             sort_by, len(analyzed_slugs), recent_domains)
+    log.info("Discovering dataset (primary_sort=%s, skip=%d slugs, recent_domains=%s)",
+             primary_sort, len(analyzed_slugs), recent_domains)
 
-    for page in range(1, 6):  # up to 5 pages
+    # --- Pass 1: primary sort mode, with domain diversity ---
+    result = _scan_pages(primary_sort, max_pages, analyzed_slugs, recent_domains)
+    if result:
+        return result
+
+    # --- Pass 2: try other sort modes, with domain diversity ---
+    for mode in _SORT_MODES:
+        if mode == primary_sort:
+            continue
+        log.info("Pass 2 — trying sort mode: %s", mode)
+        result = _scan_pages(mode, max_pages, analyzed_slugs, recent_domains)
+        if result:
+            return result
+
+    # --- Pass 3: relax domain diversity, try all sort modes ---
+    log.info("Pass 3 — relaxing domain diversity filter")
+    for mode in _SORT_MODES:
+        result = _scan_pages(mode, max_pages, analyzed_slugs, skip_domains=set())
+        if result:
+            return result
+
+    log.warning("No suitable dataset found after exhaustive search (%d pages x %d modes)",
+                max_pages, len(_SORT_MODES))
+    return None
+
+
+def _scan_pages(
+    sort_by: str,
+    max_pages: int,
+    analyzed_slugs: set[str],
+    skip_domains: set[str],
+) -> dict | None:
+    """Scan up to max_pages of Kaggle listings, skipping analyzed slugs and
+    optionally skipping datasets whose domain is in skip_domains."""
+    for page in range(1, max_pages + 1):
         rows = _kaggle_list(sort_by, page)
         if not rows:
             break
@@ -134,9 +176,8 @@ def discover_dataset(
             if not slug or slug in analyzed_slugs:
                 continue
 
-            # Prefer domain diversity
             domain_hint = _dataset_domain(row.get("tags", ""))
-            if domain_hint and domain_hint in recent_domains:
+            if skip_domains and domain_hint and domain_hint in skip_domains:
                 log.debug("Skipping %s — domain %s seen recently", slug, domain_hint)
                 continue
 
@@ -144,7 +185,8 @@ def discover_dataset(
             size = int(row.get("totalBytes", 0) or 0)
             url = f"https://www.kaggle.com/datasets/{slug}"
 
-            log.info("Selected: %s (%s, %d bytes)", slug, title, size)
+            log.info("Selected: %s (%s, %d bytes, sort=%s, page=%d)",
+                     slug, title, size, sort_by, page)
             return {
                 "slug": slug,
                 "title": title,
@@ -154,7 +196,6 @@ def discover_dataset(
                 "domain_hint": domain_hint,
             }
 
-    log.warning("No suitable dataset found after scanning 5 pages")
     return None
 
 

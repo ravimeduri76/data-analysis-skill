@@ -14,7 +14,7 @@ render_explanation(cards, title)                                  -> str
 from __future__ import annotations
 
 import dataclasses
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -297,6 +297,125 @@ def explain_missing(missing_df: pd.DataFrame, total_rows: int) -> List[InsightCa
                 f"FROM dataset"
             ),
         ))
+
+    return cards
+
+
+def explain_timeseries(
+    ts_config: object,
+    comparison: object = None,
+    forecast_result: object = None,
+    domain_ctx: Optional[dict] = None,
+    total_rows: int = 0,
+) -> List[InsightCard]:
+    """InsightCards for time-series analysis results.
+
+    Parameters
+    ----------
+    ts_config       : TimeSeriesConfig from timeseries_prep
+    comparison      : ModelComparison from timeseries_models
+    forecast_result : ForecastResult from timeseries_models
+    domain_ctx      : domain context dict
+    total_rows      : total dataset row count
+    """
+    cards: List[InsightCard] = []
+    n_obs = getattr(ts_config, "n_observations", total_rows)
+
+    # Card 1: Time index detection
+    time_col = getattr(ts_config, "time_col", "")
+    freq = getattr(ts_config, "freq", None) or "irregular"
+    freq_conf = getattr(ts_config, "freq_confidence", "low")
+    cards.append(InsightCard(
+        finding=f"Time index detected: '{time_col}' with frequency '{freq}'",
+        metric=f"freq_confidence={freq_conf}, n_observations={n_obs}",
+        source_hook="hooks/timeseries_prep.py::detect_time_index",
+        columns_used=time_col,
+        rows_analyzed=n_obs,
+        total_rows=total_rows,
+        method="datetime auto-detection + pd.infer_freq / mode-of-diff",
+        confidence=freq_conf,
+        caveats="" if freq_conf == "high" else "Frequency detection uncertain — verify manually",
+        sql_equivalent="N/A",
+    ))
+
+    # Card 2: Gap assessment
+    n_gaps = getattr(ts_config, "n_gaps", 0)
+    gap_pct = getattr(ts_config, "gap_pct", 0.0)
+    if n_gaps > 0:
+        cards.append(InsightCard(
+            finding=f"{n_gaps} gaps detected ({gap_pct}% of expected observations)",
+            metric=f"n_gaps={n_gaps}, gap_pct={gap_pct}%",
+            source_hook="hooks/timeseries_prep.py::detect_time_index",
+            columns_used=time_col,
+            rows_analyzed=n_obs,
+            total_rows=total_rows,
+            method="expected grid comparison",
+            confidence="high" if freq_conf == "high" else "medium",
+            caveats="Gap filling applied before modelling" if gap_pct > 0 else "",
+            sql_equivalent="N/A",
+        ))
+
+    # Card 3: Best model + metrics
+    if comparison is not None:
+        best = getattr(comparison, "best_model_name", "N/A")
+        rankings = getattr(comparison, "rankings", None)
+        if rankings is not None and len(rankings) > 0:
+            best_row = rankings.iloc[0]
+            mape = best_row.get("MAPE", "N/A")
+            rmse = best_row.get("RMSE", "N/A")
+            cards.append(InsightCard(
+                finding=f"Best time-series model: {best} (MAPE={mape}%)",
+                metric=f"MAPE={mape}%, RMSE={rmse}",
+                source_hook="hooks/timeseries_models.py::compare_models",
+                columns_used=", ".join(getattr(ts_config, "value_cols", [])),
+                rows_analyzed=n_obs,
+                total_rows=total_rows,
+                method="multi-model comparison (ES/ARIMA/Prophet)",
+                confidence="high" if isinstance(mape, (int, float)) and mape < 10 else "medium",
+                caveats="" if isinstance(mape, (int, float)) and mape < 20 else "High MAPE — consider additional features or longer history",
+                sql_equivalent="N/A",
+            ))
+
+    # Card 4: Forecast summary
+    if forecast_result is not None:
+        horizon = getattr(forecast_result, "horizon", 0)
+        model_name = getattr(forecast_result, "model_name", "unknown")
+        point = getattr(forecast_result, "point_forecast", None)
+        lower = getattr(forecast_result, "lower_bound", None)
+        upper = getattr(forecast_result, "upper_bound", None)
+
+        if point is not None and len(point) > 0:
+            avg_width = float((upper - lower).mean()) if lower is not None and upper is not None else 0
+            cards.append(InsightCard(
+                finding=f"Forecast: {horizon} periods ahead using {model_name}",
+                metric=f"avg_CI_width={avg_width:.2f}, range=[{float(point.iloc[0]):.2f}, {float(point.iloc[-1]):.2f}]",
+                source_hook="hooks/timeseries_models.py::forecast",
+                columns_used=", ".join(getattr(ts_config, "value_cols", [])),
+                rows_analyzed=n_obs,
+                total_rows=total_rows,
+                method=f"{model_name} with prediction intervals",
+                confidence="high" if avg_width < float(point.mean()) * 0.5 else "medium",
+                caveats="Wide confidence intervals — forecast uncertainty is high" if avg_width > float(point.mean()) * 0.5 else "",
+                sql_equivalent="N/A",
+            ))
+
+    # Card 5: Domain interpretation
+    if domain_ctx:
+        domain = domain_ctx.get("domain", "General")
+        lens = domain_ctx.get("timeseries_lens", domain_ctx.get("analysis_lens", ""))
+        if lens:
+            cards.append(InsightCard(
+                finding=f"Domain lens ({domain}): {lens}",
+                metric="N/A",
+                source_hook="hooks/domain_detector.py::detect_domain",
+                columns_used="all",
+                rows_analyzed=n_obs,
+                total_rows=total_rows,
+                method="domain-aware interpretation",
+                confidence="medium",
+                caveats="",
+                sql_equivalent="N/A",
+            ))
 
     return cards
 

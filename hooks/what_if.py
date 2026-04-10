@@ -224,6 +224,47 @@ _DOMAIN_WHAT_IF: dict = {
             "priority": "medium",
         },
     ],
+    "Retail & E-commerce (Time Series)": [
+        {
+            "missing_data": "Promotional calendar and event markers (Black Friday, holiday sales, clearance events)",
+            "current_limitation": "Forecast models cannot distinguish organic demand from promotion-driven spikes — seasonal decomposition conflates promotion effects with true seasonality",
+            "what_unlocks": "Promotion-adjusted forecasting; change-point attribution; true baseline demand estimation; promo ROI calculation",
+            "data_source": "Marketing calendar system; promotional planning tool; POS event flags",
+            "priority": "high",
+        },
+        {
+            "missing_data": "External demand signals (weather data, local events, competitor pricing)",
+            "current_limitation": "Demand forecast relies on endogenous patterns only — cannot account for weather-driven demand shifts or competitive actions",
+            "what_unlocks": "Weather-adjusted demand forecasting; competitive response modelling; external regressor integration into Prophet/ARIMAX",
+            "data_source": "Weather API (OpenWeatherMap); local event calendars; competitor price scraping",
+            "priority": "medium",
+        },
+    ],
+    "Healthcare (Time Series)": [
+        {
+            "missing_data": "Patient volume by department and service line with daily/hourly granularity",
+            "current_limitation": "Cannot forecast department-level demand or identify capacity bottlenecks with weekly/monthly aggregates",
+            "what_unlocks": "Department-level demand forecasting; staffing optimisation; bed capacity planning; ED boarding prediction",
+            "data_source": "ADT (Admit-Discharge-Transfer) system; ED tracking board; scheduling system",
+            "priority": "high",
+        },
+        {
+            "missing_data": "Staffing levels and shift schedules aligned to patient volume timestamps",
+            "current_limitation": "Cannot model staffing demand as a function of predicted patient volume — forecast exists but actionable workforce plan does not",
+            "what_unlocks": "Staffing demand forecasting; nurse-to-patient ratio optimisation; overtime cost prediction; agency staff trigger thresholds",
+            "data_source": "Workforce management system; nurse scheduling platform; timekeeping system",
+            "priority": "high",
+        },
+    ],
+    "General (Time Series)": [
+        {
+            "missing_data": "Intervention or event markers for change-point attribution",
+            "current_limitation": "Observed level shifts or trend changes cannot be attributed to specific causes (policy changes, system updates, external events)",
+            "what_unlocks": "Change-point attribution; interrupted time series analysis; intervention impact quantification; before/after comparison",
+            "data_source": "Change management log; incident tracking system; policy revision history",
+            "priority": "medium",
+        },
+    ],
     "Retail & E-commerce": [
         {
             "missing_data": "Customer lifetime transaction history",

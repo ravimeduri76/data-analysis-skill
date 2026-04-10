@@ -1266,6 +1266,8 @@ def run_experiment_loop(
 
             for _trial_in_round in range(round_budget):
                 strategy_md = _load_strategy(strategy_path)
+                log.info("LLM round %d, trial %d/%d — calling propose_next_experiment",
+                         llm_round, _trial_in_round + 1, round_budget)
 
                 proposal = propose_next_experiment(
                     strategy_md=strategy_md,

@@ -67,7 +67,7 @@ def call_llm(
         try:
             from openai import OpenAI
 
-            client = OpenAI(api_key=groq_key, base_url=_GROQ_BASE_URL)
+            client = OpenAI(api_key=groq_key, base_url=_GROQ_BASE_URL, timeout=60.0)
             messages: list[dict] = []
             if system:
                 messages.append({"role": "system", "content": system})
@@ -81,6 +81,7 @@ def call_llm(
             if expect_json:
                 kwargs["response_format"] = {"type": "json_object"}
 
+            log.info("call_llm: sending to Groq (%s), prompt=%d chars", _GROQ_MODEL, len(prompt))
             resp = client.chat.completions.create(**kwargs)
             text = resp.choices[0].message.content
             if text:
@@ -95,7 +96,7 @@ def call_llm(
         try:
             from openai import OpenAI
 
-            client_o = OpenAI(api_key=openai_key)
+            client_o = OpenAI(api_key=openai_key, timeout=60.0)
             messages_o: list[dict] = []
             if system:
                 messages_o.append({"role": "system", "content": system})
@@ -123,7 +124,7 @@ def call_llm(
         try:
             import anthropic
 
-            client_a = anthropic.Anthropic(api_key=anthropic_key)
+            client_a = anthropic.Anthropic(api_key=anthropic_key, timeout=60.0)
             kwargs_a: dict = dict(
                 model=_ANTHROPIC_MODEL,
                 max_tokens=max_tokens,

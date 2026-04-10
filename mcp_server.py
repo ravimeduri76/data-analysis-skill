@@ -1,5 +1,5 @@
 """
-mcp_server.py -- Analysis Memory MCP Server (stdio transport)
+mcp_server.py -- Analysis Memory MCP Server (SSE/stdio transport)
 
 Wraps the PostgreSQL analysis memory store as an MCP server so Claude Code,
 notebooks, agents, and any MCP-compatible client can query and write the DB
@@ -52,36 +52,73 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # MCP imports
 # ---------------------------------------------------------------------------
+import argparse
+import threading
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
 from mcp import types
 from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel.server import NotificationOptions
 
 # ---------------------------------------------------------------------------
-# Lazy DB connection — opened once per server process lifetime
+# Connection pool — replaces single-connection cache for reliability
 # ---------------------------------------------------------------------------
-_conn = None
+from psycopg2.pool import ThreadedConnectionPool
+
+_pool: ThreadedConnectionPool | None = None
+_pool_initialised: bool = False
+_thread_conns: threading.local = threading.local()
+
+
+def _get_pool() -> ThreadedConnectionPool:
+    global _pool
+    if _pool is None or _pool.closed:
+        dsn = os.environ.get(
+            "POSTGRES_URL",
+            "postgresql://postgres:memorystorepg@localhost:5432/data_analysis",
+        )
+        _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=dsn)
+    return _pool
+
+
+def _ensure_initialised() -> None:
+    global _pool_initialised
+    if _pool_initialised:
+        return
+    conn = _get_pool().getconn()
+    try:
+        from hooks.db_store import init_db
+        from hooks.semantic_store import init_semantic_db
+        init_db(conn)
+        init_semantic_db(conn)
+        _pool_initialised = True
+    finally:
+        _get_pool().putconn(conn)
 
 
 def get_conn():
-    """Return a live psycopg2 connection, (re)connecting if needed."""
-    global _conn
-    try:
-        if _conn is not None and not _conn.closed:
-            # Quick liveness check
-            _conn.cursor().execute("SELECT 1")
-            return _conn
-    except Exception:
-        _conn = None
+    """Get a connection from the pool (backward-compatible interface)."""
+    _ensure_initialised()
+    conn = _get_pool().getconn()
+    if not hasattr(_thread_conns, "checked_out"):
+        _thread_conns.checked_out = []
+    _thread_conns.checked_out.append(conn)
+    return conn
 
-    from hooks.db_store import get_connection, init_db
-    from hooks.semantic_store import init_semantic_db
 
-    _conn = get_connection()
-    init_db(_conn)
-    init_semantic_db(_conn)
-    return _conn
+def _release_thread_conns() -> None:
+    """Return all connections checked out by the current thread to the pool."""
+    if not hasattr(_thread_conns, "checked_out"):
+        return
+    for conn in _thread_conns.checked_out[:]:
+        try:
+            conn.rollback()
+            _get_pool().putconn(conn)
+        except Exception:
+            pass
+    _thread_conns.checked_out.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +388,13 @@ async def list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:  # type: ignore[override]
+    try:
+        return await _call_tool_impl(name, arguments)
+    finally:
+        _release_thread_conns()
+
+
+async def _call_tool_impl(name: str, arguments: dict) -> list[types.TextContent]:
     conn = get_conn()
     ctx = server.request_context  # RequestContext with .session for sampling/elicitation
 
@@ -1235,21 +1279,76 @@ async def read_resource(uri) -> str:  # type: ignore[override]
 # ENTRY POINT
 # ============================================================
 
-async def main() -> None:
+_INIT_OPTIONS = InitializationOptions(
+    server_name="analysis-memory",
+    server_version="2.0.0",
+    capabilities=server.get_capabilities(
+        notification_options=NotificationOptions(),
+        experimental_capabilities={},
+    ),
+)
+
+
+async def main_stdio() -> None:
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="analysis-memory",
-                server_version="1.0.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
+        await server.run(read_stream, write_stream, _INIT_OPTIONS)
+
+
+def main_sse(host: str = "localhost", port: int = 8702) -> None:
+    from starlette.applications import Starlette
+    from starlette.routing import Route, Mount
+    from starlette.responses import JSONResponse
+    import uvicorn
+
+    sse_transport = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, _INIT_OPTIONS)
+
+    async def handle_health(request):
+        pool_ok = False
+        try:
+            pool = _get_pool()
+            conn = pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            pool.putconn(conn)
+            pool_ok = True
+        except Exception:
+            pass
+        return JSONResponse({
+            "status": "healthy" if pool_ok else "degraded",
+            "server": "analysis-memory",
+            "version": "2.0.0",
+            "transport": "sse",
+            "pool_ok": pool_ok,
+        })
+
+    app = Starlette(
+        routes=[
+            Route("/health", handle_health),
+            Route("/sse", handle_sse),
+            Mount("/messages/", app=sse_transport.handle_post_message),
+        ],
+    )
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Analysis Memory MCP Server")
+    parser.add_argument(
+        "--transport", choices=["sse", "stdio"], default="sse",
+        help="Transport mode (default: sse)",
+    )
+    parser.add_argument("--host", default="localhost")
+    parser.add_argument("--port", type=int, default=8702)
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        asyncio.run(main_stdio())
+    else:
+        main_sse(host=args.host, port=args.port)
