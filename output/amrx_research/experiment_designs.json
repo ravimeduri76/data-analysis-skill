@@ -1,0 +1,200 @@
+[
+  {
+    "id": "EXP-D3",
+    "objective": "OBJ2a",
+    "surface": "Data",
+    "vector": "SMOTE rebalancing",
+    "hypothesis": "SMOTE oversampling of non-Entero (n=344) improves MCC from 0.39",
+    "design": "SMOTE(sampling_strategy=0.5) on training folds only.",
+    "expected_impact": 0.08,
+    "cost": "low",
+    "priority_score": 12.0
+  },
+  {
+    "id": "EXP-D4",
+    "objective": "OBJ2b",
+    "surface": "Data",
+    "vector": "Aggressive class grouping",
+    "hypothesis": "Reducing to top-5 organisms + Other (6 classes) improves MCC",
+    "design": "Group all except codes 14,15,20,12,11 into Other.",
+    "expected_impact": 0.06,
+    "cost": "low",
+    "priority_score": 7.8
+  },
+  {
+    "id": "EXP-F3",
+    "objective": "OBJ2a",
+    "surface": "Features",
+    "vector": "Feature selection top-k",
+    "hypothesis": "Top-20 features by importance reduces noise for small sample",
+    "design": "RF importances from baseline. Retrain with top-20.",
+    "expected_impact": 0.05,
+    "cost": "low",
+    "priority_score": 7.5
+  },
+  {
+    "id": "EXP-M2",
+    "objective": "OBJ2a",
+    "surface": "Models",
+    "vector": "SVM-RBF",
+    "hypothesis": "SVM-RBF captures non-linear Entero/non-Entero boundaries",
+    "design": "SVM(kernel=rbf, class_weight=balanced) + StandardScaler.",
+    "expected_impact": 0.06,
+    "cost": "medium",
+    "priority_score": 6.3
+  },
+  {
+    "id": "EXP-P2",
+    "objective": "OBJ2a",
+    "surface": "Parameters",
+    "vector": "Optuna GBM + threshold",
+    "hypothesis": "Tuning GBM params + threshold sweep improves bacteria MCC",
+    "design": "Optuna 50 trials + threshold sweep 0.3-0.8.",
+    "expected_impact": 0.06,
+    "cost": "medium",
+    "priority_score": 6.3
+  },
+  {
+    "id": "EXP-M3",
+    "objective": "OBJ2a",
+    "surface": "Models",
+    "vector": "Stacking ensemble",
+    "hypothesis": "Stacking combines diverse model strengths for small sample",
+    "design": "StackingClassifier(LR+RF+XGB base, LR meta).",
+    "expected_impact": 0.07,
+    "cost": "high",
+    "priority_score": 5.25
+  },
+  {
+    "id": "EXP-M4",
+    "objective": "OBJ2b",
+    "surface": "Models",
+    "vector": "Hierarchical classifier",
+    "hypothesis": "Two-stage (Entero vs non-Entero then species) outperforms flat multi-class",
+    "design": "Stage 1: binary. Stage 2: sub-model within each group.",
+    "expected_impact": 0.08,
+    "cost": "high",
+    "priority_score": 5.2
+  },
+  {
+    "id": "EXP-F4",
+    "objective": "OBJ2a",
+    "surface": "Features",
+    "vector": "BloodCulture one-hot",
+    "hypothesis": "One-hot BloodCulture (44/45/46) captures non-linear relationship",
+    "design": "One-hot encode into 3 binary columns.",
+    "expected_impact": 0.03,
+    "cost": "low",
+    "priority_score": 4.5
+  },
+  {
+    "id": "EXP-F5",
+    "objective": "OBJ2b",
+    "surface": "Features",
+    "vector": "Urological PCA",
+    "hypothesis": "PCA on 28 urological conditions creates latent risk factors",
+    "design": "PCA top-5 components from urological columns.",
+    "expected_impact": 0.04,
+    "cost": "medium",
+    "priority_score": 3.64
+  },
+  {
+    "id": "EXP-D2",
+    "objective": "OBJ1",
+    "surface": "Data",
+    "vector": "Dataset size surface",
+    "hypothesis": "Total_data.csv (7866 rows) vs matching_data (4325) generalization test",
+    "design": "Train on Total_data with same feature set. 5-fold CV.",
+    "expected_impact": 0.02,
+    "cost": "low",
+    "priority_score": 2.0
+  },
+  {
+    "id": "EXP-F1",
+    "objective": "OBJ1",
+    "surface": "Features",
+    "vector": "Symptom interactions",
+    "hypothesis": "UTI symptom co-occurrence patterns carry more signal than individuals",
+    "design": "Top-10 pairwise interaction features from symptom group.",
+    "expected_impact": 0.015,
+    "cost": "low",
+    "priority_score": 1.5
+  },
+  {
+    "id": "EXP-M1",
+    "objective": "OBJ1",
+    "surface": "Models",
+    "vector": "CatBoost native categorical",
+    "hypothesis": "CatBoost handles 1/2/3 as categorical without recoding",
+    "design": "CatBoost with cat_features for all 70 ternary columns.",
+    "expected_impact": 0.02,
+    "cost": "medium",
+    "priority_score": 1.4
+  },
+  {
+    "id": "EXP-P1",
+    "objective": "OBJ1",
+    "surface": "Parameters",
+    "vector": "Optuna LightGBM",
+    "hypothesis": "Bayesian optimization pushes LightGBM MCC above 0.90",
+    "design": "Optuna 50 trials, MCC objective, 5-fold CV.",
+    "expected_impact": 0.015,
+    "cost": "medium",
+    "priority_score": 1.05
+  },
+  {
+    "id": "EXP-D1",
+    "objective": "OBJ1",
+    "surface": "Data",
+    "vector": "Feature encoding recode",
+    "hypothesis": "Recoding 1/2/3 to 1/0/NaN (treating 3=Unknown as missing) will improve MCC",
+    "design": "Recode all 70 ternary features: 1->1, 2->0, 3->NaN. Impute with mode.",
+    "expected_impact": 0.01,
+    "cost": "low",
+    "priority_score": 1.0
+  },
+  {
+    "id": "EXP-F2",
+    "objective": "OBJ1",
+    "surface": "Features",
+    "vector": "Symptom burden score",
+    "hypothesis": "Composite symptom count captures UTI severity better",
+    "design": "symptom_burden = count of symptoms where value=1. Also comorbidity_burden.",
+    "expected_impact": 0.01,
+    "cost": "low",
+    "priority_score": 1.0
+  },
+  {
+    "id": "EXP-V1",
+    "objective": "OBJ1",
+    "surface": "Validation",
+    "vector": "10-fold repeated CV",
+    "hypothesis": "More folds and repeats provide tighter MCC confidence interval",
+    "design": "RepeatedStratifiedKFold(10, 3). Report mean, std, 95% CI.",
+    "expected_impact": 0.0,
+    "cost": "medium",
+    "priority_score": 0.0
+  },
+  {
+    "id": "EXP-I1",
+    "objective": "OBJ1",
+    "surface": "Interpretation",
+    "vector": "SHAP analysis",
+    "hypothesis": "SHAP reveals clinical feature interactions driving UTI prediction",
+    "design": "SHAP on best model. Summary + dependence plots.",
+    "expected_impact": 0.0,
+    "cost": "medium",
+    "priority_score": 0.0
+  },
+  {
+    "id": "EXP-I2",
+    "objective": "OBJ1",
+    "surface": "Interpretation",
+    "vector": "Clinical threshold opt",
+    "hypothesis": "Threshold for sensitivity>=95% produces clinical screening tool",
+    "design": "Sweep thresholds 0.1-0.9. Plot sensitivity vs specificity.",
+    "expected_impact": 0.0,
+    "cost": "low",
+    "priority_score": 0.0
+  }
+]

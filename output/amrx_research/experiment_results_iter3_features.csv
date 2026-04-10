@@ -1,0 +1,11 @@
+﻿exp_id,objective,mcc_mean,mcc_std,model,notes
+EXP-FE1,OBJ1,0.8931,0.0172,LightGBM_age_nonlinear,Age_exp50 + Age_sq + Age_over50/65
+EXP-FE2,OBJ1,0.8931,0.0188,LightGBM_temp_features,Temp_deviation + fever flags
+EXP-FE3,OBJ1,0.8921,0.0176,LightGBM_SIRS,SIRS_count + Sepsis_risk + vital thresholds
+EXP-FE4,OBJ1,0.8967,0.0194,LightGBM_symptom_x_history,10 cross-group binary interactions
+EXP-FE5,OBJ1,0.8946,0.0207,LightGBM_symptom_x_vitals,6 symptom x age/temp interactions
+EXP-FE6,OBJ1,0.8914,0.0278,LightGBM_composite_risk,weighted_symptom + uti_history + age_factor
+EXP-FE7a,OBJ1,0.8914,0.026,LightGBM_kitchen_sink,110 features total
+EXP-FE7b,OBJ1,0.8876,0.03,GBM_kitchen_sink,110 features total
+EXP-FE8a,OBJ2a,0.3542,0.0693,GBM_enriched_features,100 features total
+EXP-FE8b,OBJ2a,0.3955,0.0348,LightGBM_enriched_features,100 features total
