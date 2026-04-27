@@ -1,6 +1,6 @@
 {
   "_comment": "Auto-maintained by hooks/self_improver.py. Do not edit manually unless you know what you are doing.",
-  "_last_updated": "2026-03-25",
+  "_last_updated": "2026-04-15",
   "extra_keywords": {
     "Master Data Management": [
       "mdm",
@@ -43,6 +43,46 @@
       "coid",
       "hrsa",
       "dsh"
+    ],
+    "Financial Services / Lending": [
+      "CreditScore",
+      "EstimatedSalary",
+      "Exited",
+      "NumOfProducts",
+      "HasCrCard",
+      "IsActiveMember"
+    ],
+    "Entertainment & Media": [
+      "first_air_date",
+      "popularity",
+      "vote_average",
+      "tv shows"
+    ],
+    "Clinical Genomics": [
+      "variant",
+      "mutation",
+      "allele",
+      "chromosome",
+      "gene",
+      "genomic",
+      "CADD",
+      "gnomAD",
+      "pathogenicity",
+      "exon",
+      "intron",
+      "splice",
+      "missense",
+      "nonsense",
+      "frameshift",
+      "dbSNP",
+      "clinvar",
+      "cosmic",
+      "VEP",
+      "annotation",
+      "zygosity",
+      "heterozygous",
+      "homozygous",
+      "allele_frequency"
     ]
   },
   "extra_profiles": {

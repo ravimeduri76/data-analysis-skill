@@ -65,6 +65,7 @@ class Experiment:
     priority_score: float = 0.0
     status: str = "planned"  # planned | running | completed | skipped
     results: dict = field(default_factory=dict)
+    triage: str = "PARK"  # WI-2C: ACT_NOW | RESEARCH_MORE | PARK | KILL
 
 
 @dataclass
@@ -87,6 +88,8 @@ class ResearchProject:
     domain: str = ""
     all_trials: list[dict] = field(default_factory=list)
     stop_reason: str = ""
+    contradictions: list[dict] = field(default_factory=list)  # WI-2B
+    strategy_proposals: list[dict] = field(default_factory=list)  # WI-2D
 
 
 # ===========================================================================
@@ -299,6 +302,47 @@ def _default_metric(task_type: str) -> str:
 
 
 # ===========================================================================
+# WI-2E: Prior findings helper
+# ===========================================================================
+def _format_prior_findings(findings: list[dict] | None) -> str:
+    """Format prior experiment findings for LLM prompt injection."""
+    if not findings:
+        return "  (no prior lessons available)"
+    lines = []
+    for f in findings[:10]:
+        ftype = f.get("finding_type", "neutral")
+        surface = f.get("surface", "?")
+        vector = f.get("vector", "?")
+        score = f.get("metric_result")
+        score_str = f"score={score:.4f}" if isinstance(score, (int, float)) else "score=N/A"
+        finding = f.get("positive_finding") or f.get("negative_finding") or f.get("lesson_learned", "")
+        if finding:
+            lines.append(f"  - [{ftype}] {surface}/{vector} ({score_str}): {finding[:120]}")
+    return "\n".join(lines) if lines else "  (no prior lessons available)"
+
+
+def _build_prior_impact_adjustments(findings: list[dict] | None) -> dict[str, float]:
+    """Build a {surface: adjustment} dict from prior findings.
+
+    Positive findings on a surface boost expected_impact by +0.05.
+    Negative findings reduce by -0.03.
+    Returns net adjustment per surface.
+    """
+    if not findings:
+        return {}
+    adjustments: dict[str, float] = {}
+    for f in findings:
+        surface = f.get("surface", "")
+        ftype = f.get("finding_type", "neutral")
+        if ftype == "positive":
+            adjustments[surface] = adjustments.get(surface, 0.0) + 0.05
+        elif ftype == "negative":
+            adjustments[surface] = adjustments.get(surface, 0.0) - 0.03
+    # Clamp adjustments to [-0.15, +0.15]
+    return {s: max(-0.15, min(0.15, v)) for s, v in adjustments.items()}
+
+
+# ===========================================================================
 # Phase 2: Design experiments (LLM DoE + heuristic fallback)
 # ===========================================================================
 def phase2_design(
@@ -307,8 +351,12 @@ def phase2_design(
     quality_df: pd.DataFrame | None,
     importances: list[tuple[str, float]],
     anthropic_api_key: str | None,
+    prior_findings: list[dict] | None = None,
 ) -> list[Experiment]:
     """Phase 2: Design creative experiments across 7 research surfaces.
+
+    WI-2E: prior_findings from experiment_ledger are used to boost/reduce
+    expected_impact of experiments based on what worked/failed in past runs.
 
     Uses LLM to propose 8-15 experiments if API key is available,
     otherwise falls back to heuristic template instantiation.
@@ -320,13 +368,15 @@ def phase2_design(
     # Try LLM-guided design first
     if anthropic_api_key:
         llm_experiments = _llm_design_experiments(project, baseline_result,
-                                                   quality_df, importances)
+                                                   quality_df, importances,
+                                                   prior_findings)
         if llm_experiments:
             return llm_experiments
 
     # Heuristic fallback: template instantiation
     return _heuristic_design_experiments(project, baseline_result,
-                                         quality_df, importances)
+                                         quality_df, importances,
+                                         prior_findings)
 
 
 def _llm_design_experiments(
@@ -334,6 +384,7 @@ def _llm_design_experiments(
     baseline_result: dict,
     quality_df: pd.DataFrame | None,
     importances: list[tuple[str, float]],
+    prior_findings: list[dict] | None = None,
 ) -> list[Experiment] | None:
     """Use LLM to design creative experiments."""
     try:
@@ -395,6 +446,9 @@ def _llm_design_experiments(
 ## Previous Experiments (if any)
 {prev_text if prev_text else "  (none yet — this is the first iteration)"}
 
+## Prior Experiment Lessons (from experiment ledger)
+{_format_prior_findings(prior_findings) if prior_findings else "  (no prior lessons available)"}
+
 ## Instructions
 Design 8-15 creative experiments across at least 4 different surfaces.
 For each experiment, provide:
@@ -411,8 +465,9 @@ Example format:
   {{"surface": "features", "vector": "explicit", "hypothesis": "Ratio of top-2 important features may capture nonlinear relationship", "design": {{"type": "ratio", "numerator": "feat_a", "denominator": "feat_b"}}, "expected_impact": 0.3, "reasoning": "Top features show high individual importance but may interact"}}
 ]"""
 
-    response = call_llm(prompt, max_tokens=1500, expect_json=True)
+    response = call_llm(prompt, max_tokens=2500, expect_json=True)
     if not response:
+        log.warning("Phase2: LLM returned empty response — falling back to heuristic")
         return None
 
     try:
@@ -422,25 +477,43 @@ Example format:
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
         proposals = json.loads(raw)
         if not isinstance(proposals, list):
+            log.warning("Phase2: LLM response was not a JSON array (got %s) — falling back to heuristic",
+                        type(proposals).__name__)
             return None
-    except (json.JSONDecodeError, ValueError):
-        log.warning("Phase2: LLM response was not valid JSON")
+    except (json.JSONDecodeError, ValueError) as exc:
+        log.warning("Phase2: LLM response was not valid JSON: %s — first 200 chars: %s",
+                    exc, response[:200])
         return None
 
+    # Validate each proposal has required fields
+    valid_surfaces = {"data", "features", "architectures", "models", "parameters", "validation", "interpretation"}
     experiments: list[Experiment] = []
-    for p in proposals[:15]:
+    for i, p in enumerate(proposals[:15]):
+        if not isinstance(p, dict):
+            log.warning("Phase2: LLM proposal %d is not a dict, skipping", i)
+            continue
+        surface = p.get("surface", "features")
+        if surface not in valid_surfaces:
+            log.warning("Phase2: LLM proposal %d has invalid surface '%s', skipping", i, surface)
+            continue
+        design = p.get("design", {})
+        if not isinstance(design, dict):
+            log.warning("Phase2: LLM proposal %d has non-dict design, skipping", i)
+            continue
         exp = Experiment(
             id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface=p.get("surface", "features"),
+            surface=surface,
             vector=p.get("vector", "unknown"),
             hypothesis=p.get("hypothesis", ""),
-            design=p.get("design", {}),
+            design=design,
             expected_impact=min(1.0, max(0.0, float(p.get("expected_impact", 0.1)))),
         )
         experiments.append(exp)
 
     if len(experiments) < 4:
-        return None  # LLM gave too few — fall back to heuristic
+        log.warning("Phase2: LLM produced only %d valid experiments (need >=4) — falling back to heuristic",
+                    len(experiments))
+        return None
 
     log.info("Phase2: LLM designed %d experiments across %d surfaces",
              len(experiments), len(set(e.surface for e in experiments)))
@@ -452,134 +525,167 @@ def _heuristic_design_experiments(
     baseline_result: dict,
     quality_df: pd.DataFrame | None,
     importances: list[tuple[str, float]],
+    prior_findings: list[dict] | None = None,
 ) -> list[Experiment]:
-    """Design experiments using template instantiation (no LLM needed)."""
+    """Design experiments using template instantiation (no LLM needed).
+
+    Experiments are ordered by expected impact (high-impact first) so that
+    plateau detection doesn't kill the iteration before the best experiments run.
+
+    WI-2E: prior_findings adjust expected_impact based on past experiment outcomes.
+    """
     experiments: list[Experiment] = []
+
+    # WI-2E: build impact adjustments from prior findings
+    impact_adj = _build_prior_impact_adjustments(prior_findings)
 
     # Gather completed surface counts for diversity
     surface_counts: dict[str, int] = {}
+    completed_designs: set[str] = set()
     for e in project.experiments:
         if e.status == "completed":
             surface_counts[e.surface] = surface_counts.get(e.surface, 0) + 1
+            completed_designs.add(e.design.get("type", ""))
 
-    top_features = [name for name, _ in importances[:5]] if importances else []
+    top_features = [name for name, _ in importances[:10]] if importances else []
     baseline_score = baseline_result.get("incumbent_metric", 0)
     best_trial = baseline_result.get("best_trial", {})
     best_model_name = best_trial.get("metrics", {}).get("Model", "")
-
-    # 1. Models surface: try extended roster
-    if surface_counts.get("models", 0) < 2:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="models",
-            vector="new_model_types",
-            hypothesis="Extended model roster (GBM, ExtraTrees, SVM, KNN) may find better architecture",
-            design={"type": "extended_roster"},
-            expected_impact=0.3,
-        ))
-
-    # 2. Features surface: create interactions between top features
-    if len(top_features) >= 2 and surface_counts.get("features", 0) < 3:
-        for i in range(min(3, len(top_features) - 1)):
-            experiments.append(Experiment(
-                id=f"exp_{uuid.uuid4().hex[:8]}",
-                surface="features",
-                vector="explicit",
-                hypothesis=f"Interaction between {top_features[i]} and {top_features[i+1]} may capture synergy",
-                design={"type": "interaction", "col_a": top_features[i], "col_b": top_features[i+1]},
-                expected_impact=0.15,
-            ))
-
-    # 3. Features: log transforms on top numeric features
-    if top_features and surface_counts.get("features", 0) < 5:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="features",
-            vector="engineering",
-            hypothesis="Log transforms on skewed numeric features may help linear models",
-            design={"type": "log_top_features", "features": top_features[:3]},
-            expected_impact=0.1,
-        ))
-
-    # 4. Architectures: voting ensemble of top models
-    if surface_counts.get("architectures", 0) < 1:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="architectures",
-            vector="ensemble",
-            hypothesis="Soft voting ensemble of diverse models may reduce variance",
-            design={"type": "voting", "voting": "soft"},
-            expected_impact=0.2,
-        ))
-
-    # 5. Architectures: stacking
-    if surface_counts.get("architectures", 0) < 2:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="architectures",
-            vector="ensemble",
-            hypothesis="Stacking with LR meta-learner may capture complementary model strengths",
-            design={"type": "stacking"},
-            expected_impact=0.25,
-        ))
-
-    # 6. Data surface: SMOTE for imbalanced binary
+    task_type = project.task_type
+    is_classification = task_type in ("binary", "multiclass")
     positive_rate = baseline_result.get("positive_rate")
-    if positive_rate is not None and positive_rate < 0.3 and surface_counts.get("data", 0) < 1:
+
+    def _add(surface: str, vector: str, hypothesis: str, design: dict,
+             impact: float, *, guard: bool = True) -> None:
+        if not guard:
+            return
+        # WI-2E: adjust impact based on prior findings for this surface
+        adjusted_impact = max(0.0, min(1.0, impact + impact_adj.get(surface, 0.0)))
         experiments.append(Experiment(
             id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="data",
-            vector="quantity_augmentation",
-            hypothesis=f"SMOTE may help with class imbalance (positive_rate={positive_rate:.2f})",
-            design={"type": "smote"},
-            expected_impact=0.2,
+            surface=surface, vector=vector,
+            hypothesis=hypothesis, design=design,
+            expected_impact=adjusted_impact,
         ))
 
-    # 7. Validation: K-fold CV for robust estimates
-    if surface_counts.get("validation", 0) < 1:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="validation",
-            vector="kfold_cv",
-            hypothesis="5-fold CV will give more robust performance estimate than single split",
-            design={"type": "kfold", "n_splits": 5, "model": best_model_name},
-            expected_impact=0.0,  # validation doesn't directly improve score
-        ))
+    # -----------------------------------------------------------------------
+    # HIGH IMPACT (0.25-0.40) — run first
+    # -----------------------------------------------------------------------
 
-    # 8. Interpretation: permutation importance
-    if surface_counts.get("interpretation", 0) < 1:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="interpretation",
-            vector="permutation_importance",
-            hypothesis="Permutation importance may reveal features that hurt generalization",
-            design={"type": "permutation"},
-            expected_impact=0.05,
-        ))
+    # 1. Optuna Bayesian optimization — always try, no baseline gate
+    _add("parameters", "bayesian_optimization",
+         f"Bayesian optimization on {best_model_name or 'best model'} may find better hyperparameters",
+         {"type": "optuna", "n_trials": 20, "model": best_model_name},
+         impact=0.35,
+         guard="optuna" not in completed_designs)
 
-    # 9. Parameters: Optuna if baseline is decent
-    if baseline_score > 0.3 and surface_counts.get("parameters", 0) < 1:
-        experiments.append(Experiment(
-            id=f"exp_{uuid.uuid4().hex[:8]}",
-            surface="parameters",
-            vector="bayesian_optimization",
-            hypothesis=f"Bayesian optimization on {best_model_name} may squeeze out remaining headroom",
-            design={"type": "optuna", "n_trials": 15, "model": best_model_name},
-            expected_impact=0.2,
-        ))
+    # 2. Extended model roster (GBM, ExtraTrees, SVM, KNN, CatBoost)
+    _add("models", "new_model_types",
+         "Extended model roster (GBM, ExtraTrees, SVM, KNN) may find better architecture",
+         {"type": "extended_roster"},
+         impact=0.30,
+         guard=surface_counts.get("models", 0) < 2)
 
-    # 10. Data: quality fixes if data challenges exist
+    # 3. Feature selection — drop low-importance features to reduce noise
+    if len(top_features) >= 5:
+        # Keep top-60% features, drop the rest
+        n_keep = max(3, int(len(top_features) * 0.6))
+        low_imp = [name for name, _ in importances[n_keep:]] if importances else []
+        if low_imp:
+            _add("features", "selection",
+                 f"Dropping {len(low_imp)} low-importance features may reduce noise",
+                 {"type": "drop", "cols": low_imp},
+                 impact=0.25,
+                 guard="feature_selection" not in completed_designs)
+
+    # 4. Class weight / threshold tuning for classification
+    if is_classification and "threshold_tuning" not in completed_designs:
+        _add("interpretation", "threshold_tuning",
+             "Threshold optimization may improve F1/recall trade-off",
+             {"type": "threshold_tuning"},
+             impact=0.25)
+
+    # 5. SMOTE for imbalanced binary
+    if positive_rate is not None and positive_rate < 0.3:
+        _add("data", "quantity_augmentation",
+             f"SMOTE may help with class imbalance (positive_rate={positive_rate:.2f})",
+             {"type": "smote"},
+             impact=0.25,
+             guard="smote" not in completed_designs)
+
+    # -----------------------------------------------------------------------
+    # MEDIUM IMPACT (0.15-0.24) — ensembles, data quality, targeted features
+    # -----------------------------------------------------------------------
+
+    # 6. Stacking ensemble
+    _add("architectures", "ensemble",
+         "Stacking with LR meta-learner may capture complementary model strengths",
+         {"type": "stacking"},
+         impact=0.22,
+         guard="stacking" not in completed_designs)
+
+    # 7. Voting ensemble
+    _add("architectures", "ensemble",
+         "Soft voting ensemble of diverse models may reduce variance",
+         {"type": "voting", "voting": "soft"},
+         impact=0.20,
+         guard="voting" not in completed_designs)
+
+    # 8. KNN imputation for high-null columns
     if quality_df is not None and not quality_df.empty:
         high_null = quality_df[quality_df["null_pct"] > 20]
-        if len(high_null) > 0 and surface_counts.get("data", 0) < 2:
-            experiments.append(Experiment(
-                id=f"exp_{uuid.uuid4().hex[:8]}",
-                surface="data",
-                vector="quality_fixes",
-                hypothesis="KNN imputation on high-null columns may preserve more signal than median fill",
-                design={"type": "knn_impute", "columns": high_null["column"].tolist()[:5]},
-                expected_impact=0.15,
-            ))
+        if len(high_null) > 0:
+            _add("data", "quality_fixes",
+                 "KNN imputation on high-null columns may preserve more signal than median fill",
+                 {"type": "knn_impute", "columns": high_null["column"].tolist()[:5]},
+                 impact=0.18,
+                 guard="knn_impute" not in completed_designs)
+
+    # 9. Feature interactions — top-1 * top-3 (skip adjacent-only pattern)
+    if len(top_features) >= 4 and surface_counts.get("features", 0) < 4:
+        # Cross top-1 with top-3,4 (non-adjacent, more likely to find novel signal)
+        pairs = [(top_features[0], top_features[2]),
+                 (top_features[0], top_features[3]),
+                 (top_features[1], top_features[3])]
+        for col_a, col_b in pairs:
+            _add("features", "explicit",
+                 f"Interaction {col_a} * {col_b} may capture non-adjacent synergy",
+                 {"type": "interaction", "col_a": col_a, "col_b": col_b},
+                 impact=0.15)
+
+    # 10. Ratio features — top-1 / top-2 (only if both numeric)
+    if len(top_features) >= 2:
+        _add("features", "explicit",
+             f"Ratio {top_features[0]} / {top_features[1]} may capture relative magnitude",
+             {"type": "ratio", "numerator": top_features[0], "denominator": top_features[1]},
+             impact=0.15,
+             guard="ratio" not in completed_designs)
+
+    # -----------------------------------------------------------------------
+    # LOW IMPACT (0.0-0.14) — validation, interpretation, log transforms
+    # -----------------------------------------------------------------------
+
+    # 11. Log transforms on skewed features
+    if top_features:
+        _add("features", "engineering",
+             "Log transforms on skewed numeric features may help linear models",
+             {"type": "log_top_features", "features": top_features[:3]},
+             impact=0.08,
+             guard="log_top_features" not in completed_designs)
+
+    # 12. K-fold CV for robust estimates
+    _add("validation", "kfold_cv",
+         "5-fold CV will give more robust performance estimate than single split",
+         {"type": "kfold", "n_splits": 5, "model": best_model_name},
+         impact=0.0,
+         guard="kfold" not in completed_designs)
+
+    # 13. Permutation importance — useful for next iteration's feature selection
+    _add("interpretation", "permutation_importance",
+         "Permutation importance may reveal features that hurt generalization",
+         {"type": "permutation"},
+         impact=0.05,
+         guard="permutation" not in completed_designs)
 
     log.info("Phase2 heuristic: designed %d experiments across %d surfaces",
              len(experiments), len(set(e.surface for e in experiments)))
@@ -587,15 +693,110 @@ def _heuristic_design_experiments(
 
 
 # ===========================================================================
-# Phase 3: Prioritize experiments
+# Phase 3: Prioritize experiments (with WI-2C triage)
 # ===========================================================================
+# ===========================================================================
+# WI-2B: Contradiction detection (OB1 pattern: research-synthesis)
+# ===========================================================================
+def _detect_contradictions(experiments: list[Experiment]) -> list[dict]:
+    """Find pairs of completed experiments on the same surface/vector with opposite outcomes.
+
+    A contradiction is when one experiment improved the score and another on the same
+    surface/vector did not (or vice versa).
+    """
+    completed = [e for e in experiments if e.status == "completed" and e.results]
+
+    # Group by (surface, vector)
+    groups: dict[tuple[str, str], list[Experiment]] = {}
+    for e in completed:
+        key = (e.surface, e.vector)
+        groups.setdefault(key, []).append(e)
+
+    contradictions: list[dict] = []
+    for (surface, vector), group in groups.items():
+        if len(group) < 2:
+            continue
+
+        positives = [e for e in group if e.results.get("best_score", -np.inf) > -np.inf
+                     and e.results.get("best_score", -np.inf) > 0]
+        negatives = [e for e in group if e.results.get("best_score", -np.inf) <= 0
+                     or e.results.get("error")]
+
+        # Check for mixed results: at least one experiment improved and one didn't
+        scores = [e.results.get("best_score", -np.inf) for e in group
+                  if isinstance(e.results.get("best_score"), (int, float))]
+        if len(scores) >= 2:
+            best = max(scores)
+            worst = min(scores)
+            # Significant divergence: best > 0 improvement but worst shows degradation or no improvement
+            if best > worst and (best - worst) > 0.01:
+                contradictions.append({
+                    "surface": surface,
+                    "vector": vector,
+                    "exp_ids": [e.id for e in group],
+                    "scores": scores,
+                    "description": (
+                        f"{surface}/{vector}: scores diverge ({worst:.4f} to {best:.4f}). "
+                        f"{len(group)} experiments, range={best-worst:.4f}. "
+                        f"Both findings preserved for investigation."
+                    ),
+                })
+
+    return contradictions
+
+
+_TRIAGE_ORDER = {"ACT_NOW": 0, "RESEARCH_MORE": 1, "PARK": 2, "KILL": 3}
+
+
+def triage_experiment(exp: Experiment, project: ResearchProject) -> str:
+    """WI-2C: Classify experiment urgency (OB1 pattern: panning-for-gold triage).
+
+    Returns ACT_NOW | RESEARCH_MORE | PARK | KILL.
+    """
+    surface_completed = sum(
+        1 for e in project.experiments
+        if e.status == "completed" and e.surface == exp.surface
+    )
+    # Gather improvement data for this surface
+    surface_improvements = [
+        e.results.get("best_score", -np.inf) - project.best_score
+        for e in project.experiments
+        if e.status == "completed" and e.surface == exp.surface
+        and isinstance(e.results.get("best_score"), (int, float))
+    ]
+    all_negligible = all(imp < 0.001 for imp in surface_improvements) if surface_improvements else False
+    has_contradictions = len(project.contradictions) > 0 and any(
+        c.get("surface") == exp.surface for c in project.contradictions
+    )
+
+    # KILL: surface exhausted with no improvement
+    if surface_completed >= 3 and all_negligible and exp.expected_impact < 0.1:
+        return "KILL"
+
+    # ACT_NOW: high impact, affordable, surface not exhausted
+    cost_by_surface: dict[str, float] = {}
+    for s in project.surfaces:
+        avg = np.mean([v.cost_estimate for v in s.vectors]) if s.vectors else 2.0
+        cost_by_surface[s.id] = avg
+    cost = cost_by_surface.get(exp.surface, 2.0)
+    if exp.expected_impact > 0.2 and cost < 3.0 and surface_completed < 3:
+        return "ACT_NOW"
+
+    # RESEARCH_MORE: mixed results or contradictions on this surface
+    if exp.expected_impact > 0.15 and (has_contradictions or (surface_improvements and not all_negligible)):
+        return "RESEARCH_MORE"
+
+    return "PARK"
+
+
 def phase3_prioritize(
     experiments: list[Experiment],
     project: ResearchProject,
 ) -> list[Experiment]:
-    """Phase 3: Rank experiments by priority_score = (impact + diversity_bonus + gap_bonus) / cost.
+    """Phase 3: Triage + rank experiments.
 
-    Returns experiments sorted by descending priority_score.
+    WI-2C: assigns triage category, filters KILL experiments, sorts by
+    triage tier then priority_score within each tier.
     """
     if not experiments:
         return experiments
@@ -633,14 +834,27 @@ def phase3_prioritize(
 
         exp.priority_score = round((impact + diversity_bonus + gap_bonus) / cost, 4)
 
-    # Sort descending by priority score
-    experiments.sort(key=lambda e: e.priority_score, reverse=True)
+        # WI-2C: assign triage
+        exp.triage = triage_experiment(exp, project)
 
-    log.info("Phase3: prioritized %d experiments (top: %s score=%.3f)",
-             len(experiments),
-             experiments[0].hypothesis[:50] if experiments else "none",
-             experiments[0].priority_score if experiments else 0)
-    return experiments
+    # Filter KILL experiments (mark as skipped)
+    killed = [e for e in experiments if e.triage == "KILL"]
+    for e in killed:
+        e.status = "skipped"
+    active = [e for e in experiments if e.triage != "KILL"]
+
+    # Sort: triage tier first (ACT_NOW > RESEARCH_MORE > PARK), then priority_score within
+    active.sort(key=lambda e: (_TRIAGE_ORDER.get(e.triage, 2), -e.priority_score))
+
+    if killed:
+        log.info("Phase3: killed %d exhausted experiments", len(killed))
+
+    log.info("Phase3: prioritized %d experiments (top: %s [%s] score=%.3f)",
+             len(active),
+             active[0].hypothesis[:50] if active else "none",
+             active[0].triage if active else "?",
+             active[0].priority_score if active else 0)
+    return active + killed  # killed at the end for logging/reporting
 
 
 # ===========================================================================
@@ -704,6 +918,7 @@ def phase4_execute(
         stop = _check_stopping(
             best_score, project.stopping_threshold, trial_count, max_trials,
             time.time() - start_time, max_seconds, improvement_scores,
+            llm_budget_usd=budget.get("llm_budget_usd", 0.0),
         )
         if stop:
             exp.status = "skipped"
@@ -782,6 +997,7 @@ def _check_stopping(
     elapsed_s: float,
     max_seconds: float,
     improvement_scores: list[float],
+    llm_budget_usd: float = 0.0,
 ) -> str | None:
     """Check stopping criteria. Returns reason string or None."""
     if best_score >= threshold and threshold > 0:
@@ -790,10 +1006,20 @@ def _check_stopping(
         return "budget_exhausted"
     if elapsed_s >= max_seconds:
         return "budget_exhausted"
-    # Plateau: last 3 improvements all < 0.005
-    if len(improvement_scores) >= 3:
-        last3 = improvement_scores[-3:]
-        if all(imp < 0.005 for imp in last3):
+    # WI-3A: LLM token budget check
+    if llm_budget_usd > 0:
+        try:
+            from hooks.llm_client import check_budget
+            if not check_budget(llm_budget_usd):
+                return "llm_budget_exhausted"
+        except ImportError:
+            pass
+    # Plateau: need at least 5 experiments before checking, then last 4 must all
+    # show < 0.001 improvement. This prevents early stopping before high-impact
+    # experiments (Optuna, ensembles) get a chance to run.
+    if len(improvement_scores) >= 5:
+        last4 = improvement_scores[-4:]
+        if all(imp < 0.001 for imp in last4):
             return "plateau_detected"
     return None
 
@@ -1052,6 +1278,67 @@ def _execute_single_experiment(
             "best_trial": result, "model_entry": entry}
 
 
+def _find_best_model_entry(
+    project: ResearchProject,
+    task_type: str,
+) -> dict:
+    """Find the best model entry by checking base + extended rosters.
+
+    Falls back to base roster[0] if no match found.
+    """
+    from hooks.ml_experiment import (
+        _build_model_roster_binary,
+        _build_model_roster_regression,
+        build_extended_model_roster,
+    )
+    is_classification = task_type in ("binary", "multiclass")
+    if is_classification:
+        roster = _build_model_roster_binary()
+    else:
+        roster = _build_model_roster_regression()
+
+    # Also include extended roster for matching
+    try:
+        extended = build_extended_model_roster(task_type)
+        roster = roster + extended
+    except Exception:
+        pass
+
+    best_name = project.best_model
+    if not best_name:
+        return roster[0]
+
+    # Exact match
+    entry = next((e for e in roster if e["name"] == best_name), None)
+    if entry:
+        return entry
+
+    # Fuzzy match: strip version/trial suffixes like "_v2", "_t5", "Optuna_"
+    import re
+    clean_name = re.sub(r'(_v\d+|_t\d+|^Optuna_)', '', best_name)
+    entry = next((e for e in roster if e["name"] == clean_name), None)
+    if entry:
+        return entry
+
+    # Abbreviation map for common model name mismatches
+    abbrev_map = {"LGB": "LightGBM", "XGB": "XGBoost", "RF": "RandomForest",
+                  "CB": "CatBoost", "LR": "LogisticRegression", "GBM": "GradientBoosting"}
+    expanded = abbrev_map.get(clean_name, clean_name)
+    if expanded != clean_name:
+        entry = next((e for e in roster if e["name"] == expanded
+                      or e["name"].startswith(expanded)), None)
+        if entry:
+            return entry
+
+    # Substring match
+    entry = next((e for e in roster if clean_name in e["name"] or e["name"] in clean_name), None)
+    if entry:
+        return entry
+
+    log.info("Model '%s' not found in roster, using %s", best_name, roster[0]["name"])
+    return roster[0]
+
+
 def _run_with_mutations(
     mutations: list[dict],
     X: pd.DataFrame,
@@ -1070,8 +1357,6 @@ def _run_with_mutations(
     from hooks.ml_experiment import (
         apply_feature_mutations,
         run_single_trial,
-        _build_model_roster_binary,
-        _build_model_roster_regression,
     )
     from sklearn.model_selection import train_test_split
 
@@ -1087,15 +1372,8 @@ def _run_with_mutations(
     else:
         Xt, Xv, yt, yv = train_test_split(X_mut, y, test_size=0.20, random_state=42)
 
-    # Run best model from roster
-    if is_classification:
-        roster = _build_model_roster_binary()
-    else:
-        roster = _build_model_roster_regression()
-
-    # Try to find model matching project best
-    best_name = project.best_model
-    entry = next((e for e in roster if e["name"] == best_name), roster[0])
+    # Find best model from combined base + extended roster
+    entry = _find_best_model_entry(project, task_type)
 
     result = run_single_trial(entry, Xt, Xv, yt, yv, mut_names, task_type, primary_metric)
     result["description"] = f"{result.get('description', '')} + {', '.join(mut_descs[:3])}"
@@ -1115,7 +1393,7 @@ def _run_smote_experiment(
     project: ResearchProject,
 ) -> dict:
     """Run SMOTE oversampling experiment."""
-    from hooks.ml_experiment import run_single_trial, _build_model_roster_binary
+    from hooks.ml_experiment import run_single_trial
 
     try:
         from imblearn.over_sampling import SMOTE
@@ -1131,9 +1409,7 @@ def _run_smote_experiment(
         log.warning("SMOTE failed: %s", exc)
         return {"trials": [], "best_score": -np.inf, "best_trial": {}}
 
-    roster = _build_model_roster_binary()
-    best_name = project.best_model
-    entry = next((e for e in roster if e["name"] == best_name), roster[0])
+    entry = _find_best_model_entry(project, task_type)
 
     result = run_single_trial(entry, X_res, X_test, pd.Series(y_res), y_test,
                                feature_names, task_type, primary_metric)
@@ -1245,7 +1521,7 @@ def _run_optuna_experiment(
     model_name: str,
     n_trials: int,
 ) -> dict:
-    """Run Optuna Bayesian optimization on a model."""
+    """Run Optuna Bayesian optimization with expanded search space."""
     try:
         import optuna
         optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1262,59 +1538,126 @@ def _run_optuna_experiment(
     best_trial_info: dict = {}
     best_entry: dict = {}
 
+    # Determine which model families are available
+    has_lgb = _has_lightgbm()
+    has_xgb = _has_xgboost()
+    has_catboost = False
+    try:
+        import catboost  # noqa: F401
+        has_catboost = True
+    except ImportError:
+        pass
+
+    # Build model choice list based on availability + hint from model_name
+    model_choices = []
+    if has_lgb:
+        model_choices.append("LightGBM")
+    if has_xgb:
+        model_choices.append("XGBoost")
+    if has_catboost:
+        model_choices.append("CatBoost")
+    model_choices.append("RandomForest")  # always available
+
+    # If model_name hints at a specific model, put it first
+    import re
+    clean = re.sub(r'(_v\d+|^Optuna_)', '', model_name)
+    for mc in model_choices:
+        if clean.lower() in mc.lower() or mc.lower() in clean.lower():
+            model_choices.remove(mc)
+            model_choices.insert(0, mc)
+            break
+
     def objective(trial: optuna.Trial) -> float:
         nonlocal best_score, best_trial_info, best_entry
 
-        # Choose model type based on what's available
-        n_estimators = trial.suggest_int("n_estimators", 100, 500)
-        learning_rate = trial.suggest_float("learning_rate", 0.01, 0.3, log=True)
+        # Common hyperparameters
+        n_estimators = trial.suggest_int("n_estimators", 100, 600)
+        learning_rate = trial.suggest_float("learning_rate", 0.005, 0.3, log=True)
         max_depth = trial.suggest_int("max_depth", 3, 12)
+        subsample = trial.suggest_float("subsample", 0.6, 1.0)
+        reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True)
+        reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True)
+
+        # Model selection — Optuna explores across model families
+        if len(model_choices) > 1:
+            chosen_model = trial.suggest_categorical("model_type", model_choices)
+        else:
+            chosen_model = model_choices[0]
 
         try:
-            if model_name in ("LightGBM", "") and _has_lightgbm():
+            if chosen_model == "LightGBM":
                 import lightgbm as lgb
+                num_leaves = trial.suggest_int("num_leaves", 15, 127)
+                min_child = trial.suggest_int("min_child_samples", 5, 100)
+                colsample = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+                params = dict(
+                    n_estimators=n_estimators, learning_rate=learning_rate,
+                    max_depth=max_depth, num_leaves=num_leaves,
+                    subsample=subsample, colsample_bytree=colsample,
+                    reg_alpha=reg_alpha, reg_lambda=reg_lambda,
+                    min_child_samples=min_child,
+                    random_state=42, verbose=-1, n_jobs=-1,
+                )
                 if is_classification:
-                    model = lgb.LGBMClassifier(
-                        n_estimators=n_estimators, learning_rate=learning_rate,
-                        max_depth=max_depth, is_unbalance=True,
-                        random_state=42, verbose=-1, n_jobs=-1,
-                    )
+                    params["is_unbalance"] = True
+                    model = lgb.LGBMClassifier(**params)
                 else:
-                    model = lgb.LGBMRegressor(
-                        n_estimators=n_estimators, learning_rate=learning_rate,
-                        max_depth=max_depth, random_state=42,
-                        verbose=-1, n_jobs=-1,
-                    )
+                    model = lgb.LGBMRegressor(**params)
                 name = "Optuna_LGB"
-            elif model_name in ("XGBoost_aucpr", "XGBoost", "") and _has_xgboost():
+
+            elif chosen_model == "XGBoost":
                 import xgboost as xgb
+                colsample = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+                min_child_w = trial.suggest_float("min_child_weight", 1, 20, log=True)
+                params = dict(
+                    n_estimators=n_estimators, learning_rate=learning_rate,
+                    max_depth=max_depth, subsample=subsample,
+                    colsample_bytree=colsample,
+                    reg_alpha=reg_alpha, reg_lambda=reg_lambda,
+                    min_child_weight=min_child_w,
+                    random_state=42, n_jobs=-1, verbosity=0,
+                )
                 if is_classification:
-                    model = xgb.XGBClassifier(
-                        n_estimators=n_estimators, learning_rate=learning_rate,
-                        max_depth=max_depth, eval_metric="aucpr",
-                        use_label_encoder=False, random_state=42,
-                        n_jobs=-1, verbosity=0,
-                    )
+                    params["eval_metric"] = "aucpr"
+                    params["use_label_encoder"] = False
+                    model = xgb.XGBClassifier(**params)
                 else:
-                    model = xgb.XGBRegressor(
-                        n_estimators=n_estimators, learning_rate=learning_rate,
-                        max_depth=max_depth, random_state=42,
-                        n_jobs=-1, verbosity=0,
-                    )
+                    model = xgb.XGBRegressor(**params)
                 name = "Optuna_XGB"
-            else:
-                from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+            elif chosen_model == "CatBoost":
+                import catboost as cb
+                params = dict(
+                    iterations=n_estimators, learning_rate=learning_rate,
+                    depth=min(max_depth, 10),  # CatBoost max depth is 16 but 10 is practical
+                    subsample=subsample,
+                    l2_leaf_reg=reg_lambda,
+                    random_seed=42, verbose=0,
+                )
                 if is_classification:
-                    model = RandomForestClassifier(
-                        n_estimators=n_estimators, max_depth=max_depth,
-                        class_weight="balanced", random_state=42, n_jobs=-1,
-                    )
+                    params["auto_class_weights"] = "Balanced"
+                    model = cb.CatBoostClassifier(**params)
                 else:
-                    model = RandomForestRegressor(
-                        n_estimators=n_estimators, max_depth=max_depth,
-                        random_state=42, n_jobs=-1,
-                    )
+                    model = cb.CatBoostRegressor(**params)
+                name = "Optuna_CB"
+
+            else:  # RandomForest
+                from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+                min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+                max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+                params = dict(
+                    n_estimators=n_estimators, max_depth=max_depth,
+                    min_samples_leaf=min_samples_leaf,
+                    max_features=max_features,
+                    random_state=42, n_jobs=-1,
+                )
+                if is_classification:
+                    params["class_weight"] = "balanced"
+                    model = RandomForestClassifier(**params)
+                else:
+                    model = RandomForestRegressor(**params)
                 name = "Optuna_RF"
+
         except Exception:
             from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
             if is_classification:
@@ -1332,7 +1675,9 @@ def _run_optuna_experiment(
         entry = {
             "name": f"{name}_t{trial.number}",
             "model": model,
-            "description": f"Optuna trial {trial.number}: n={n_estimators} lr={learning_rate:.4f} depth={max_depth}",
+            "description": (f"Optuna trial {trial.number}: {chosen_model} "
+                            f"n={n_estimators} lr={learning_rate:.4f} depth={max_depth} "
+                            f"subsample={subsample:.2f} reg_a={reg_alpha:.2e} reg_l={reg_lambda:.2e}"),
         }
 
         result = run_single_trial(
@@ -1350,7 +1695,7 @@ def _run_optuna_experiment(
         return score
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=min(n_trials, 15), show_progress_bar=False)
+    study.optimize(objective, n_trials=min(n_trials, 20), show_progress_bar=False)
 
     return {"trials": trials, "best_score": best_score,
             "best_trial": best_trial_info, "model_entry": best_entry,
@@ -1574,6 +1919,122 @@ def adapt_stopping_threshold(
 
 
 # ===========================================================================
+# WI-2D: Strategy approval gate (OB1 pattern: life-engine self-improvement)
+# ===========================================================================
+
+def _propose_strategy_change(
+    project: ResearchProject,
+    improvement_history: list[dict],
+    anthropic_api_key: str | None = None,
+) -> dict | None:
+    """Propose ONE specific strategy change based on improvement trajectory.
+
+    Called every 2nd iteration. Returns a proposal dict or None if no change needed.
+
+    Proposal types:
+      - raise_budget: increase trial count or time budget
+      - switch_surface: shift focus to a different research surface
+      - add_custom_experiment: suggest a specific experiment not in the template set
+      - lower_threshold: reduce stopping threshold if it seems unreachable
+    """
+    if len(improvement_history) < 2:
+        return None
+
+    # Analyze recent trajectory
+    recent = improvement_history[-3:] if len(improvement_history) >= 3 else improvement_history
+    improvements = [h.get("improvement", 0) for h in recent]
+    avg_improvement = sum(improvements) / len(improvements) if improvements else 0
+    best_score = project.best_score
+    gap = project.stopping_threshold - best_score
+
+    # Count experiments per surface
+    surface_scores: dict[str, list[float]] = {}
+    for e in project.experiments:
+        if e.status == "completed" and e.results.get("best_score") is not None:
+            score = e.results["best_score"]
+            if isinstance(score, (int, float)):
+                surface_scores.setdefault(e.surface, []).append(score)
+
+    # Heuristic proposals
+    proposal = None
+
+    # If stalling (avg improvement < 0.002) and gap is large
+    if avg_improvement < 0.002 and gap > 0.1:
+        # Find the surface with the best average score improvement
+        best_surface = None
+        best_avg = -np.inf
+        for surface, scores in surface_scores.items():
+            if len(scores) >= 2:
+                avg = np.mean(scores)
+                if avg > best_avg:
+                    best_avg = avg
+                    best_surface = surface
+
+        if best_surface and best_surface != "parameters":
+            proposal = {
+                "change_type": "switch_surface",
+                "description": f"Focus next iteration on '{best_surface}' surface (avg score={best_avg:.4f})",
+                "rationale": f"Recent improvement averaging {avg_improvement:.4f} per iteration. "
+                             f"'{best_surface}' surface showed best average results.",
+                "risk": "low",
+            }
+        else:
+            # Suggest raising budget since we're stalling
+            current_trials = project.budget.get("max_trials", 30)
+            proposal = {
+                "change_type": "raise_budget",
+                "description": f"Increase max_trials from {current_trials} to {int(current_trials * 1.5)}",
+                "rationale": f"Improvement stalled at {avg_improvement:.4f}/iter with gap={gap:.4f} to threshold. "
+                             f"More trials may help Optuna find better hyperparameters.",
+                "risk": "medium",
+                "new_value": int(current_trials * 1.5),
+            }
+
+    # If threshold seems unreachable (gap > 3x best improvement seen)
+    elif gap > 0 and avg_improvement > 0:
+        iters_needed = gap / max(avg_improvement, 0.001)
+        remaining = project.budget.get("max_trials", 30) - len(project.all_trials)
+        if iters_needed > remaining * 2:
+            proposal = {
+                "change_type": "lower_threshold",
+                "description": f"Lower stopping threshold from {project.stopping_threshold:.4f} to {best_score + gap * 0.5:.4f}",
+                "rationale": f"At current rate ({avg_improvement:.4f}/iter), reaching threshold would take "
+                             f"~{iters_needed:.0f} more experiment sets. Lowering threshold to a realistic target.",
+                "risk": "low",
+                "new_value": round(best_score + gap * 0.5, 4),
+            }
+
+    return proposal
+
+
+def _apply_strategy_proposal(project: ResearchProject, proposal: dict) -> bool:
+    """Apply a strategy proposal to the project. Returns True if applied."""
+    change_type = proposal.get("change_type", "")
+
+    if change_type == "raise_budget":
+        new_val = proposal.get("new_value")
+        if new_val and isinstance(new_val, int):
+            project.budget["max_trials"] = new_val
+            log.info("Strategy applied: max_trials raised to %d", new_val)
+            return True
+
+    elif change_type == "lower_threshold":
+        new_val = proposal.get("new_value")
+        if new_val and isinstance(new_val, (int, float)):
+            project.stopping_threshold = float(new_val)
+            project.threshold_rationale = f"Lowered by strategy proposal: {proposal['rationale'][:80]}"
+            log.info("Strategy applied: threshold lowered to %.4f", new_val)
+            return True
+
+    elif change_type == "switch_surface":
+        # This is informational — the next phase2_design will naturally use it
+        log.info("Strategy proposal: %s (informational, no direct change)", proposal["description"])
+        return True
+
+    return False
+
+
+# ===========================================================================
 # Research project markdown
 # ===========================================================================
 def update_research_project_md(project: ResearchProject, out_dir: str | Path | None) -> str:
@@ -1644,6 +2105,22 @@ def update_research_project_md(project: ResearchProject, out_dir: str | Path | N
     lines.append(f"\n### Stopping Threshold")
     lines.append(f"- Current: {project.stopping_threshold:.4f}")
     lines.append(f"- Rationale: {project.threshold_rationale}")
+
+    # WI-2B: Contradictions
+    if project.contradictions:
+        lines.append("\n## Contradictions")
+        lines.append("_Experiments with conflicting outcomes on the same surface/vector — both preserved._\n")
+        for c in project.contradictions:
+            lines.append(f"- **[{c.get('surface', '?')}]** {c.get('description', 'N/A')}")
+
+    # WI-2D: Strategy proposals
+    if project.strategy_proposals:
+        lines.append("\n## Strategy Proposals")
+        for i, p in enumerate(project.strategy_proposals, 1):
+            status = "auto-approved" if p.get("auto_approved") else "queued for review"
+            lines.append(f"- **[{p.get('change_type', '?')}]** {p.get('description', '')} ({status})")
+            if p.get("rationale"):
+                lines.append(f"  _Rationale: {p['rationale'][:120]}_")
 
     text = "\n".join(lines)
     text = text.encode("ascii", errors="replace").decode("ascii")
@@ -1784,6 +2261,11 @@ def run_research_project(
     project.primary_metric = primary_metric
     project.domain = understanding["domain"]
 
+    # --- WI-2E: compute dataset hash for experiment ledger recall ---
+    import hashlib
+    _hash_input = f"{sorted(df.columns.tolist())}|{project.domain}|{target_col}"
+    project._dataset_hash = hashlib.sha256(_hash_input.encode()).hexdigest()[:16]
+
     # --- Build feature matrix ---
     id_cols = col_classes.get("identifiers", [])
     try:
@@ -1849,9 +2331,27 @@ def run_research_project(
             log.info("Research: === Iteration %d/%d ===", project.iteration, max_iterations)
 
             # Phase 2: Design experiments
+            # WI-2E: recall prior experiment findings for this domain
+            prior_findings = None
+            if hasattr(project, '_dataset_hash') and project._dataset_hash:
+                try:
+                    conn_str = os.environ.get("POSTGRES_URL")
+                    if conn_str:
+                        from hooks.db_store import get_connection
+                        _conn = get_connection(conn_str)
+                        prior_findings = recall_prior_experiments(
+                            _conn, project._dataset_hash, project.domain, limit=15,
+                        )
+                        _conn.close()
+                        if prior_findings:
+                            log.info("Research: recalled %d prior experiment findings", len(prior_findings))
+                except Exception as exc:
+                    log.debug("Research: could not recall prior experiments: %s", exc)
+
             project.phase = "design"
             new_experiments = phase2_design(
                 project, baseline_result, quality_df, importances, anthropic_api_key,
+                prior_findings=prior_findings,
             )
             if not new_experiments:
                 log.info("Research: no experiments designed, stopping")
@@ -1894,6 +2394,57 @@ def run_research_project(
             if best_model_obj:
                 importances = extract_feature_importances(best_model_obj, feature_names)
 
+            # WI-2B: detect contradictions across all completed experiments
+            project.contradictions = _detect_contradictions(project.experiments)
+            if project.contradictions:
+                log.info("Research: %d contradictions detected", len(project.contradictions))
+
+            # WI-2D: Strategy approval gate — every 2nd iteration, propose a change
+            if project.iteration >= 2 and project.iteration % 2 == 0:
+                proposal = _propose_strategy_change(project, project.improvement_history, anthropic_api_key)
+                if proposal:
+                    project.strategy_proposals.append(proposal)
+                    risk = proposal.get("risk", "medium")
+                    if risk == "low":
+                        # Auto-approve low-risk changes
+                        applied = _apply_strategy_proposal(project, proposal)
+                        proposal["auto_approved"] = applied
+                        log.info("Strategy: auto-approved '%s' — %s",
+                                 proposal["change_type"], proposal["description"][:60])
+                    else:
+                        # Persist for human review via pending_confirmations
+                        proposal["auto_approved"] = False
+                        try:
+                            conn_str = os.environ.get("POSTGRES_URL")
+                            if conn_str:
+                                from hooks.db_store import get_connection
+                                from hooks.hitl_analyzer import (
+                                    HITLRequest, analyze_all, aggregate_for_presentation,
+                                    persist_presentation, init_pending_confirmations,
+                                )
+                                _conn = get_connection(conn_str)
+                                init_pending_confirmations(_conn)
+                                req = HITLRequest(
+                                    request_id=f"strategy_{uuid.uuid4().hex[:8]}",
+                                    agent_id="AG40",
+                                    nature="rule_confirmation",
+                                    entity_name=proposal["change_type"],
+                                    entity_type="strategy_proposal",
+                                    dataset=None,
+                                    project=project.objective[:50],
+                                    description=proposal["description"],
+                                    priority="non_blocking",
+                                    proposed_change=proposal,
+                                )
+                                analyzed = analyze_all([req])
+                                pres = aggregate_for_presentation(analyzed)
+                                persist_presentation(_conn, pres)
+                                _conn.close()
+                                log.info("Strategy: queued '%s' for human review — %s",
+                                         proposal["change_type"], proposal["description"][:60])
+                        except Exception as exc:
+                            log.debug("Strategy: could not persist proposal: %s", exc)
+
             # Adapt threshold
             new_thresh, thresh_rationale = adapt_stopping_threshold(
                 project, project.improvement_history,
@@ -1925,14 +2476,27 @@ def run_research_project(
     # Self-improvement
     try:
         from hooks.self_improver import run_self_improvement
-        run_self_improvement("research_project", {
-            "best_score": project.best_score,
-            "primary_metric": primary_metric,
-            "task_type": task_type,
-            "iterations": project.iteration,
-            "stop_reason": project.stop_reason,
-            "surfaces_explored": list(set(e.surface for e in project.experiments)),
-        })
+        run_self_improvement({
+            "dataset_path": str(out_dir or ""),
+            "query": f"ML research project: {project.objective}",
+            "domain_detected": project.domain,
+            "domain_method": domain_ctx.get("method", "unknown") if domain_ctx else "unknown",
+            "domain_confidence": domain_ctx.get("confidence", "?") if domain_ctx else "?",
+            "domain_correct": None,
+            "domain_actual": None,
+            "analysis_type": "ml_experiment",
+            "workflows_run": ["E"],
+            "row_count": len(df),
+            "col_count": len(df.columns),
+            "column_names": df.columns.tolist(),
+            "issues": [],
+            "findings_summary": (
+                f"Research project: best={project.best_model}, "
+                f"{primary_metric}={project.best_score:.4f}, "
+                f"iterations={project.iteration}, stop={project.stop_reason}, "
+                f"surfaces={list(set(e.surface for e in project.experiments))}"
+            ),
+        }, anthropic_api_key=anthropic_api_key)
     except Exception:
         pass
 
@@ -2090,6 +2654,16 @@ def init_experiment_ledger(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_experiment_ledger_surface
             ON experiment_ledger (dataset_hash, surface)
         """)
+        # WI-2A: structured lesson columns (idempotent migration)
+        for col, col_type in [
+            ("positive_finding", "TEXT"),
+            ("negative_finding", "TEXT"),
+            ("finding_type", "TEXT DEFAULT 'neutral'"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE experiment_ledger ADD COLUMN IF NOT EXISTS {col} {col_type}")
+            except Exception:
+                pass  # Column already exists or older PG without IF NOT EXISTS
     conn.commit()
 
 
@@ -2099,8 +2673,13 @@ def save_experiment_to_ledger(
     experiment: dict,
     dataset_hash: str,
     domain: str,
+    incumbent_score: float = -np.inf,
 ) -> None:
-    """Persist a completed experiment to the ledger."""
+    """Persist a completed experiment to the ledger with structured findings.
+
+    WI-2A: classifies each experiment as positive/negative/error and records
+    both positive_finding and negative_finding for downstream learning.
+    """
     # Handle both Experiment dataclass (as dict) and raw dict
     surface = experiment.get("surface", "")
     vector = experiment.get("vector", "")
@@ -2111,18 +2690,47 @@ def save_experiment_to_ledger(
 
     metric_result = results.get("best_score", results.get("score", None))
     actual_impact = None
-    lesson = results.get("error", "")
+    error_msg = results.get("error", "")
+
+    # Classify finding type and generate structured findings
+    positive_finding = None
+    negative_finding = None
+    finding_type = "neutral"
+
+    if error_msg:
+        finding_type = "error"
+        negative_finding = error_msg
+    elif metric_result is not None and isinstance(metric_result, (int, float)):
+        if metric_result > incumbent_score:
+            delta = metric_result - incumbent_score
+            actual_impact = delta
+            finding_type = "positive"
+            positive_finding = (
+                f"Improved metric from {incumbent_score:.4f} to {metric_result:.4f} "
+                f"(+{delta:.4f}) via {surface}/{vector}"
+            )
+        else:
+            finding_type = "negative"
+            negative_finding = (
+                f"{surface}/{vector} did not improve metric "
+                f"(got {metric_result:.4f} vs incumbent {incumbent_score:.4f})"
+            )
+
+    # Backward-compat: lesson_learned is a combined summary
+    lesson = positive_finding or negative_finding or error_msg or ""
 
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO experiment_ledger
                 (run_id, dataset_hash, domain, surface, vector, hypothesis,
-                 config_json, metric_result, expected_impact, actual_impact, lesson_learned)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 config_json, metric_result, expected_impact, actual_impact,
+                 lesson_learned, positive_finding, negative_finding, finding_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             run_id, dataset_hash, domain, surface, vector, hypothesis,
             json.dumps(design, default=str), metric_result,
             expected_impact, actual_impact, lesson,
+            positive_finding, negative_finding, finding_type,
         ))
 
 
@@ -2133,23 +2741,26 @@ def recall_prior_experiments(
     surface: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """Retrieve prior experiments from the ledger for a dataset/domain."""
+    """Retrieve prior experiments from the ledger for a dataset/domain.
+
+    WI-2A: includes positive_finding, negative_finding, finding_type columns.
+    """
+    _COLUMNS = """run_id, dataset_hash, domain, surface, vector, hypothesis,
+                  config_json, metric_result, expected_impact, actual_impact,
+                  lesson_learned, created_at,
+                  positive_finding, negative_finding, finding_type"""
     with conn.cursor() as cur:
         if surface:
-            cur.execute("""
-                SELECT run_id, dataset_hash, domain, surface, vector, hypothesis,
-                       config_json, metric_result, expected_impact, actual_impact,
-                       lesson_learned, created_at
+            cur.execute(f"""
+                SELECT {_COLUMNS}
                 FROM experiment_ledger
                 WHERE dataset_hash = %s AND domain = %s AND surface = %s
                 ORDER BY created_at DESC
                 LIMIT %s
             """, (dataset_hash, domain, surface, limit))
         else:
-            cur.execute("""
-                SELECT run_id, dataset_hash, domain, surface, vector, hypothesis,
-                       config_json, metric_result, expected_impact, actual_impact,
-                       lesson_learned, created_at
+            cur.execute(f"""
+                SELECT {_COLUMNS}
                 FROM experiment_ledger
                 WHERE dataset_hash = %s AND domain = %s
                 ORDER BY created_at DESC

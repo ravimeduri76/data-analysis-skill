@@ -384,12 +384,39 @@ def phase_analyze(data_path: str, candidate: dict) -> dict:
     log.info("Domain: %s (confidence=%s, method=%s)",
              domain_ctx["domain"], domain_ctx["confidence"], domain_ctx["method"])
 
+    # Step 1c — Read Domain Patterns (SKILL.md curated guidance, semantic match)
+    domain_context_text = ""
+    try:
+        from hooks.skill_history_reader import get_domain_context
+        domain_context_text = get_domain_context(
+            domain_ctx.get("domain", "General"),
+            anthropic_api_key=api_key,
+            threshold=0.6,
+        )
+        if domain_context_text:
+            log.info("Domain patterns loaded (%d chars) for domain=%r",
+                     len(domain_context_text), domain_ctx.get("domain"))
+        else:
+            log.info("No curated domain patterns matched detected domain=%r",
+                     domain_ctx.get("domain"))
+    except Exception as exc:
+        log.warning("Step 1c (skill_history_reader) failed (non-fatal): %s", exc)
+
+    # Attach curated guidance to domain_ctx so downstream LLM steps can reference it.
+    if domain_context_text:
+        domain_ctx["curated_patterns"] = domain_context_text
+
     # Trace
     trace = AnalysisTrace(
         dataset_path=data_path,
         query=f"Kaggle daily analysis of {candidate['title']}",
         domain_ctx=domain_ctx,
     )
+    if domain_context_text:
+        trace.log_step("domain_patterns",
+                        "Loaded curated domain patterns from SKILL.md",
+                        {"chars": len(domain_context_text)},
+                        domain_context_text[:400])
     trace.log_step("load", "Loaded dataset", {"path": data_path}, f"{rows} rows x {cols} cols")
     trace.log_step("profile", "Profiled columns", {}, f"{len(profile)} columns profiled")
     trace.log_step("classify", "Classified columns", {}, json.dumps({k: len(v) for k, v in col_classes.items()}, default=str))
@@ -461,7 +488,7 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
         from hooks.ml_experiment import (
             select_target, build_feature_matrix,
             run_experiment_loop, append_results_tsv,
-            render_experiment_summary,
+            render_experiment_summary, FeatureMatrixEmptyError,
         )
     except ImportError:
         log.warning("Phase 3b — ml_experiment hook not available, skipping")
@@ -491,9 +518,20 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
     id_cols = col_classes.get("identifiers", [])
     try:
         X, y, feature_names = build_feature_matrix(df, target_col, id_cols)
+    except FeatureMatrixEmptyError as exc:
+        # Categorised failure — this dataset shape is a known robustness gap.
+        # Record as actionable pending improvement rather than silent crash.
+        log.error("Phase 3b — empty feature matrix, dataset unsupported: %s", exc)
+        trace.log_step("ml_features", "ML feature matrix", {},
+                        f"FAILED-UNSUPPORTED: {exc}")
+        analysis.setdefault("failure_mode", "empty_feature_matrix")
+        analysis.setdefault("failure_detail", str(exc))
+        return None
     except Exception as exc:
         log.error("Phase 3b — feature matrix build failed: %s", exc)
         trace.log_step("ml_features", "ML feature matrix", {}, f"FAILED: {exc}")
+        analysis.setdefault("failure_mode", "feature_matrix_error")
+        analysis.setdefault("failure_detail", str(exc))
         return None
 
     trace.log_step("ml_features", "ML feature matrix",
@@ -530,15 +568,16 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
             trace.log_step("ml_loop", "ML experiment loop", {}, f"FAILED: {exc}")
             return None
     except Exception as exc:
-        log.error("Phase 3b — research orchestrator failed: %s", exc)
+        log.exception("Phase 3b — research orchestrator failed: %s", exc)
         trace.log_step("ml_loop", "ML research project", {}, f"FAILED: {exc}")
         return None
 
     # 4. Log each trial + best as insight
-    for t in result["trials"]:
+    for i, t in enumerate(result["trials"], 1):
+        trial_id = t.get("trial_id", i)
         trace.log_step(
-            f"ml_trial_{t['trial_id']}", f"Trial {t['model']}",
-            t["metrics"], f"status={t['status']}",
+            f"ml_trial_{trial_id}", f"Trial {t.get('model', '?')}",
+            t.get("metrics", {}), f"status={t.get('status', '?')}",
         )
 
     best = result.get("best_trial", {})
@@ -588,6 +627,36 @@ def phase_ml_experiment(analysis: dict, day_dir: Path, candidate: dict) -> Optio
 
     result["summary_text"] = summary
     result["target_info"] = target_info
+
+    # Quality gate: count successful trials + meaningful score for downstream
+    # self-improvement routing. "poor" triggers failure-analysis path instead
+    # of platitude-generating Learned-Patterns append.
+    trials = result.get("trials", [])
+    successful = [
+        t for t in trials
+        if t.get("status") in ("evaluated", "keep")
+        and (t.get("metrics") or {})
+    ]
+    best_score = float(result.get("incumbent_metric", float("-inf")))
+    # Baseline thresholds per metric — scores at or below these are "not learnable"
+    metric = str(result.get("primary_metric", "")).upper()
+    if metric in ("PR_AUC", "ROC_AUC", "MCC", "MACRO_F1"):
+        baseline = 0.55
+    elif metric == "R2":
+        baseline = 0.05
+    else:
+        baseline = -1e9
+    # Quality is "poor" only when BOTH conditions fail: too few trials AND
+    # score below baseline. A high score with few trials (e.g. R2=0.984 with
+    # 1 trial) is still a valid learning — don't gate it out.
+    if len(successful) < 3 and best_score <= baseline:
+        result["run_quality"] = "poor"
+        result["run_quality_reason"] = (
+            f"successful_trials={len(successful)} "
+            f"(need >=3), best_{metric}={best_score:.4f} (need >{baseline})"
+        )
+    else:
+        result["run_quality"] = "good"
     return result
 
 
@@ -848,7 +917,23 @@ def phase_persist(analysis: dict) -> Optional[str]:
 
 
 def phase_self_improve(analysis: dict, data_path: str, candidate: dict) -> str:
-    """Phase 5: Feed learnings back into the skill."""
+    """Phase 5: Feed learnings back into the skill.
+
+    Quality-gated: if the run produced insufficient usable signal (see
+    run_quality in phase_ml_experiment), we skip the LLM reflection path
+    entirely and write a structured failure-analysis stub to
+    pending_improvements.md instead. This prevents dilution of SKILL.md's
+    hand-curated Learned Patterns section with fortune-cookie wisdom
+    generated from crashes or near-baseline runs.
+    """
+    ml_result = analysis.get("ml_result") or {}
+    run_quality = ml_result.get("run_quality", "unknown")
+    failure_mode = analysis.get("failure_mode")
+
+    # Poor-quality or hard-failure runs: route to failure-analysis stub.
+    if run_quality == "poor" or failure_mode:
+        return _write_failure_analysis(analysis, candidate, ml_result)
+
     try:
         from hooks.self_improver import run_self_improvement, improvement_report
     except ImportError:
@@ -872,6 +957,7 @@ def phase_self_improve(analysis: dict, data_path: str, candidate: dict) -> str:
         "column_names": list(analysis["df"].columns),
         "issues": [],
         "findings_summary": f"{len(analysis['insights'])} insights, {analysis['n_anomalies']} anomalies",
+        "run_quality": run_quality,
     }
 
     try:
@@ -882,6 +968,50 @@ def phase_self_improve(analysis: dict, data_path: str, candidate: dict) -> str:
     except Exception as exc:
         log.error("Phase 5 — self-improvement failed (non-fatal): %s", exc)
         return f"_Self-improvement error: {exc}_"
+
+
+def _write_failure_analysis(analysis: dict, candidate: dict,
+                              ml_result: dict) -> str:
+    """Write a structured pending-improvements entry for a failed or
+    low-signal run. Bypasses the LLM platitude path.
+    """
+    from datetime import datetime, timezone
+    pending_path = Path(__file__).resolve().parent / "pending_improvements.md"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    slug = candidate.get("slug", "unknown")
+    title = candidate.get("title", "")
+    domain = analysis.get("domain_ctx", {}).get("domain", "General")
+    rows = analysis.get("rows", "?")
+    cols = analysis.get("cols", "?")
+    failure_mode = analysis.get("failure_mode") or "low_signal"
+    failure_detail = analysis.get("failure_detail", "")
+    run_quality_reason = ml_result.get("run_quality_reason", "")
+
+    target_info = ml_result.get("target_info") or {}
+    tgt = target_info.get("col", "?")
+    task = target_info.get("task_type", "?")
+
+    lines = [
+        f"\n## {ts} — FAILURE ANALYSIS",
+        f"",
+        f"- Dataset: `{slug}` ({title})",
+        f"- Detected domain: {domain}",
+        f"- Shape: {rows} rows x {cols} cols",
+        f"- Chosen target: `{tgt}` (task={task})",
+        f"- Failure mode: **{failure_mode}**",
+    ]
+    if failure_detail:
+        lines.append(f"- Detail: {failure_detail[:400]}")
+    if run_quality_reason:
+        lines.append(f"- Quality gate: {run_quality_reason}")
+    lines.append(f"- [ ] Harden pipeline against this failure mode "
+                 f"(see weekly_failure_digest for cluster)")
+    with open(pending_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    msg = (f"Run quality=poor on `{slug}`. Failure mode={failure_mode}. "
+           f"Written to pending_improvements.md. Skipped Learned Patterns append.")
+    log.info("Phase 5 GATED — %s", msg)
+    return f"_{msg}_"
 
 
 def phase_report(ctx: dict, day_dir: Path) -> str:

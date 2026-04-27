@@ -837,6 +837,62 @@ def scope_solution(
     }
 
 
+# ---------------------------------------------------------------------------
+# WI-1A: Two-stage hybrid LLM classification (OB1 pattern: typed-edge-classifier)
+# ---------------------------------------------------------------------------
+_CHEAP_CONFIDENCE_GATE = 0.7  # cheap-classify must exceed this to skip expensive call
+_CONFIDENCE_MAP = {"high": 0.9, "medium": 0.6, "low": 0.3}
+
+
+def _cheap_classify(
+    signature: str,
+    domain_names: list[str],
+    user_query: str = "",
+) -> tuple[str, float, str] | None:
+    """Quick domain classification using the cheapest available LLM tier.
+
+    Returns (domain, confidence_score, raw_confidence) or None on failure.
+    Uses a minimal prompt (<200 tokens) to classify domain only.
+    """
+    try:
+        from hooks.llm_client import call_llm
+    except ImportError:
+        return None
+
+    prompt = (
+        f"Classify this dataset into ONE domain.\n"
+        f"Columns: {signature[:500]}\n"
+        f"{'Query: ' + user_query[:100] if user_query else ''}\n"
+        f"Domains: {', '.join(domain_names)}\n"
+        f"Reply ONLY:\nDOMAIN: <name>\nCONFIDENCE: high/medium/low"
+    )
+    try:
+        text = call_llm(prompt, max_tokens=50)
+        if not text:
+            return None
+
+        domain = "General"
+        confidence_raw = "low"
+        for line in text.splitlines():
+            line = line.strip()
+            if line.upper().startswith("DOMAIN:"):
+                raw = line.split(":", 1)[1].strip()
+                # Match against known domains
+                for d in domain_names:
+                    if d.lower() in raw.lower() or raw.lower() in d.lower():
+                        domain = d
+                        break
+                else:
+                    domain = raw if raw else "General"
+            elif line.upper().startswith("CONFIDENCE:"):
+                confidence_raw = line.split(":", 1)[1].strip().lower()
+
+        score = _CONFIDENCE_MAP.get(confidence_raw, 0.3)
+        return (domain, score, confidence_raw)
+    except Exception:
+        return None
+
+
 def detect_domain(
     df: pd.DataFrame,
     anthropic_api_key: Optional[str] = None,
@@ -844,6 +900,9 @@ def detect_domain(
     user_query: str = "",
 ) -> dict:
     """Detect the business domain of a DataFrame and scope the solution type.
+
+    WI-1A: Uses two-stage hybrid classification — a cheap LLM call first,
+    and only escalates to the expensive full prompt if confidence < gate.
 
     Returns a dict with keys:
       domain               : str — detected domain name
@@ -859,6 +918,7 @@ def detect_domain(
       lifecycle_stage      : str — where in the data lifecycle this solution sits
       typical_tools        : list[str] — tools / models commonly used for this solution
       key_outputs          : list[str] — expected deliverables
+      classification_tiers_used : list[str] — which LLM tiers were invoked
     """
     signature = _col_signature(df)
 
@@ -872,6 +932,42 @@ def detect_domain(
             all_solution_names.extend(s["name"] for s in sols if isinstance(s, dict))
 
         lifecycle_stages = list(_LIFECYCLE_STAGE_KEYWORDS.keys())
+
+        # --- Stage 1: Cheap classify (OB1 pattern: Haiku filter) ---
+        tiers_used = []
+        cheap_result = _cheap_classify(signature, domain_names, user_query)
+        if cheap_result:
+            cheap_domain, cheap_score, cheap_conf = cheap_result
+            tiers_used.append("cheap")
+            log.info("domain_detector: cheap classify -> %s (confidence=%s, score=%.2f)",
+                     cheap_domain, cheap_conf, cheap_score)
+
+            # If cheap confidence is high enough, use it with heuristic solution/lifecycle
+            if cheap_score >= _CHEAP_CONFIDENCE_GATE:
+                profile = _get_domain_profiles().get(cheap_domain, _DOMAIN_PROFILES["General"])
+                sol = _heuristic_solution(df, cheap_domain, user_query)
+                tools = sol.get("typical_tools") or sol.get("typical_models") or []
+                return {
+                    "domain":               cheap_domain,
+                    "confidence":           cheap_conf,
+                    "role":                 profile["role"],
+                    "summary":              f"Quick-classified as {cheap_domain} dataset.",
+                    "analysis_lens":        profile["analysis_lens"],
+                    "anomaly_guidance":     profile["anomaly_guidance"],
+                    "key_metrics":          profile["key_metrics"],
+                    "method":               "claude",
+                    "solution_name":        sol.get("name", "Exploratory Data Analysis"),
+                    "solution_description": sol.get("description", ""),
+                    "lifecycle_stage":      _detect_lifecycle_stage(user_query, sol),
+                    "typical_tools":        tools,
+                    "key_outputs":          sol.get("key_outputs", []),
+                    "classification_tiers_used": tiers_used,
+                }
+
+        # --- Stage 2: Expensive full prompt (only if cheap was low-confidence or failed) ---
+        tiers_used.append("expensive")
+        log.info("domain_detector: escalating to expensive classify (cheap %s)",
+                 "failed" if not cheap_result else f"low-confidence ({cheap_result[2]})")
 
         prompt = (
             f"You are a data domain and solution classification expert.\n\n"
@@ -955,6 +1051,7 @@ def detect_domain(
                 "lifecycle_stage":      lifecycle_stage,
                 "typical_tools":        tools,
                 "key_outputs":          sol.get("key_outputs", []),
+                "classification_tiers_used": tiers_used,
             }
 
         except Exception:

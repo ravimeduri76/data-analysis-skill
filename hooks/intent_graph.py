@@ -670,9 +670,97 @@ def _get_siblings(conn, node_id: int, app_id: str = "base") -> list[dict]:
 # Full intent resolution pipeline
 # ---------------------------------------------------------------------------
 
+# Default thresholds (used when DB is unavailable or not initialized)
 _AMBIGUITY_THRESHOLD    = 0.05   # cosine sim delta within which candidates may be ambiguous
 _LOW_CONFIDENCE_FLOOR   = 0.55   # below this score, always flag — match may not exist in graph
 _MIN_CONFIDENCE_TO_MATCH = 0.45  # below this, return no match (random noise)
+
+
+# ---------------------------------------------------------------------------
+# WI-1B: Adaptive per-type confidence thresholds (OB1 pattern: adaptive-capture-classification)
+# ---------------------------------------------------------------------------
+_THRESHOLD_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS intent_thresholds (
+    id              SERIAL PRIMARY KEY,
+    threshold_name  TEXT UNIQUE NOT NULL,
+    value           FLOAT NOT NULL,
+    corrections     INT DEFAULT 0,
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+
+_DEFAULT_THRESHOLDS = {
+    "ambiguity_threshold":     0.05,
+    "low_confidence_floor":    0.55,
+    "min_confidence_to_match": 0.45,
+}
+
+_THRESHOLD_FLOOR = 0.01
+_THRESHOLD_CEILING = 0.95
+_ADJUSTMENT_STEP = 0.005
+
+
+def init_intent_thresholds(conn) -> None:
+    """Create the intent_thresholds table and seed defaults (idempotent)."""
+    with conn.cursor() as cur:
+        cur.execute(_THRESHOLD_TABLE_SQL)
+        for name, default_val in _DEFAULT_THRESHOLDS.items():
+            cur.execute(
+                "INSERT INTO intent_thresholds (threshold_name, value) "
+                "VALUES (%s, %s) ON CONFLICT (threshold_name) DO NOTHING",
+                (name, default_val),
+            )
+    conn.commit()
+
+
+def get_threshold(conn, name: str) -> float:
+    """Read an adaptive threshold from DB, falling back to hardcoded default."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM intent_thresholds WHERE threshold_name = %s",
+                (name,),
+            )
+            row = cur.fetchone()
+            if row:
+                return float(row[0])
+    except Exception:
+        pass
+    return _DEFAULT_THRESHOLDS.get(name, 0.05)
+
+
+def record_correction(conn, threshold_name: str, was_correct: bool, actual_score: float) -> float:
+    """Record a correction and adjust the threshold adaptively.
+
+    If was_correct=False and actual_score was above threshold (false positive):
+      raise threshold by _ADJUSTMENT_STEP.
+    If was_correct=False and actual_score was below threshold (false negative):
+      lower threshold by _ADJUSTMENT_STEP.
+    If was_correct=True: no adjustment, just increment counter.
+
+    Returns the new threshold value.
+    """
+    current = get_threshold(conn, threshold_name)
+
+    if not was_correct:
+        if actual_score >= current:
+            # False positive: threshold too low, raise it
+            new_val = min(_THRESHOLD_CEILING, current + _ADJUSTMENT_STEP)
+        else:
+            # False negative: threshold too high, lower it
+            new_val = max(_THRESHOLD_FLOOR, current - _ADJUSTMENT_STEP)
+    else:
+        new_val = current  # correct prediction, no adjustment
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE intent_thresholds "
+            "SET value = %s, corrections = corrections + 1, updated_at = NOW() "
+            "WHERE threshold_name = %s",
+            (new_val, threshold_name),
+        )
+    conn.commit()
+    return new_val
 
 
 def _get_root_ancestor(conn, node_id: int) -> Optional[int]:
@@ -775,8 +863,13 @@ def resolve_intent(
     top = candidates[0]
     top_score = top["score"]
 
+    # WI-1B: resolve adaptive thresholds from DB (falls back to module constants)
+    min_conf = get_threshold(conn, "min_confidence_to_match")
+    ambiguity_thresh = get_threshold(conn, "ambiguity_threshold")
+    low_conf_floor = get_threshold(conn, "low_confidence_floor")
+
     # Too low to be meaningful — graph has no relevant node
-    if top_score < _MIN_CONFIDENCE_TO_MATCH:
+    if top_score < min_conf:
         return {**empty, "graph_used": True,
                 "requires_clarification": True,
                 "clarification_reason": f"No graph node matched with sufficient confidence (best={top_score:.3f}) — intent may not yet be seeded"}
@@ -793,7 +886,7 @@ def resolve_intent(
     cross_branch: list[dict] = []
     same_branch:  list[dict] = []
     for c in candidates[1:]:
-        if (top_score - c["score"]) > _AMBIGUITY_THRESHOLD:
+        if (top_score - c["score"]) > ambiguity_thresh:
             break  # beyond threshold — stop
         try:
             c_root = _get_root_ancestor(conn, c["id"])
@@ -808,10 +901,10 @@ def resolve_intent(
     requires_clarification = False
     clarification_reason: Optional[str] = None
 
-    if top_score < _LOW_CONFIDENCE_FLOOR:
+    if top_score < low_conf_floor:
         requires_clarification = True
         clarification_reason = (
-            f"Low confidence match ({top_score:.3f} < {_LOW_CONFIDENCE_FLOOR}) — "
+            f"Low confidence match ({top_score:.3f} < {low_conf_floor}) — "
             f"intent may not be fully represented in the graph. "
             f"Closest match: {top['label']}. Consider adding a more specific node."
         )
@@ -870,6 +963,60 @@ def resolve_intent(
         "clarification_reason":     clarification_reason,
         "graph_used":               True,
     }
+
+
+# ---------------------------------------------------------------------------
+# WI-1D: Fuzzy entity resolution (OB1 pattern: schema-aware-routing)
+# ---------------------------------------------------------------------------
+
+def find_similar_entities(
+    conn,
+    name: str,
+    entity_type: str = "",
+    top_k: int = 5,
+    min_score: float = 0.3,
+) -> list[dict]:
+    """Find entities with similar names using BGE-M3 embedding similarity.
+
+    Queries intent_nodes (level='specific') for names semantically similar
+    to the input. Used for entity deduplication and disambiguation.
+
+    Returns list of dicts: {id, name, label, score}
+    """
+    model = _get_embed_model()
+    if model is None:
+        return []
+
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+
+    q_vec = model.encode([name], normalize_embeddings=True)[0]
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, name, label, embedding FROM intent_nodes "
+            "WHERE level = 'specific' AND embedding IS NOT NULL",
+        )
+        rows = cur.fetchall()
+
+    results = []
+    for node_id, node_name, label, embedding in rows:
+        if not embedding:
+            continue
+        vec = np.array(embedding, dtype=np.float32)
+        score = float(np.dot(q_vec, vec))
+        if score >= min_score:
+            results.append({
+                "id": node_id,
+                "name": node_name,
+                "label": label,
+                "score": round(score, 4),
+            })
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_k]
 
 
 # ---------------------------------------------------------------------------

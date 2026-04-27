@@ -431,6 +431,173 @@ def render_report(results: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# WI-1C: Evaluation Harness (OB1 pattern: n-agentic-harnesses)
+# ---------------------------------------------------------------------------
+
+# Acceptance criteria per scenario. Each criterion is a (name, check_fn) pair
+# where check_fn takes the scenario result dict and returns (passed: bool, detail: str).
+
+def _check_domain(expected: str):
+    def _fn(r: dict) -> tuple[bool, str]:
+        detected = r.get("domain", {}).get("detected", "unknown")
+        ok = expected.lower() in detected.lower() or detected.lower() in expected.lower()
+        return ok, f"expected={expected}, got={detected}"
+    return _fn
+
+
+def _check_intent_confidence(min_conf: float):
+    def _fn(r: dict) -> tuple[bool, str]:
+        conf = r.get("intent", {}).get("confidence", 0)
+        return conf >= min_conf, f"confidence={conf:.3f} (min={min_conf})"
+    return _fn
+
+
+def _check_plan_resolved(r: dict) -> tuple[bool, str]:
+    name = r.get("execution_plan", {}).get("plan_name", "NONE")
+    return name != "NONE", f"plan={name}"
+
+
+def _check_no_hitl(r: dict) -> tuple[bool, str]:
+    clarif = r.get("intent", {}).get("requires_clarification", False)
+    hitl_gates = r.get("execution_plan", {}).get("hitl_gates", [])
+    return not clarif and len(hitl_gates) == 0, f"clarification={clarif}, hitl_gates={len(hitl_gates)}"
+
+
+def _check_has_hitl(r: dict) -> tuple[bool, str]:
+    clarif = r.get("intent", {}).get("requires_clarification", False)
+    hitl_gates = r.get("execution_plan", {}).get("hitl_gates", [])
+    return clarif or len(hitl_gates) > 0, f"clarification={clarif}, hitl_gates={len(hitl_gates)}"
+
+
+def _check_agent_present(agent_id: str):
+    def _fn(r: dict) -> tuple[bool, str]:
+        agents = r.get("execution_plan", {}).get("agents", [])
+        ids = [a.get("agent_id", "") for a in agents]
+        return agent_id in ids, f"agents={ids}"
+    return _fn
+
+
+def _check_plan_method(methods: list[str]):
+    def _fn(r: dict) -> tuple[bool, str]:
+        method = r.get("execution_plan", {}).get("method", "fallback")
+        return method in methods, f"method={method}, expected one of {methods}"
+    return _fn
+
+
+EVALUATION_HARNESS: dict[int, list[tuple[str, callable]]] = {
+    1: [
+        ("domain is Commercial/Industrial", _check_domain("Commercial / Industrial")),
+        ("intent confidence > 0.4", _check_intent_confidence(0.4)),
+        ("execution plan resolved", _check_plan_resolved),
+        ("plan method is llm or semantic", _check_plan_method(["llm", "semantic", "pattern_match"])),
+    ],
+    2: [
+        ("domain is Commercial/Industrial", _check_domain("Commercial / Industrial")),
+        ("intent confidence > 0.4", _check_intent_confidence(0.4)),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    3: [
+        ("domain is Commercial/Industrial", _check_domain("Commercial / Industrial")),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    4: [
+        ("domain is MDM", _check_domain("Master Data Management")),
+        ("intent confidence > 0.4", _check_intent_confidence(0.4)),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    5: [
+        ("domain is MDM", _check_domain("Master Data Management")),
+        ("intent confidence > 0.4", _check_intent_confidence(0.4)),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    6: [
+        ("domain is Healthcare", _check_domain("Healthcare")),
+        ("intent confidence > 0.4", _check_intent_confidence(0.4)),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    7: [
+        ("domain is Healthcare", _check_domain("Healthcare")),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    8: [
+        ("domain is Healthcare", _check_domain("Healthcare")),
+        ("intent confidence > 0.4", _check_intent_confidence(0.4)),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    9: [
+        ("domain is Healthcare", _check_domain("Healthcare")),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+    10: [
+        ("domain is Wellness", _check_domain("Wellness")),
+        ("execution plan resolved", _check_plan_resolved),
+    ],
+}
+
+
+def run_harness(results: list[dict], scenario_id: int | None = None) -> dict:
+    """Run the evaluation harness against pipeline results.
+
+    Returns {scenario_id: {"passed": int, "failed": int, "total": int, "details": [...]}}
+    """
+    harness_results: dict[int, dict] = {}
+
+    for r in results:
+        sid = r.get("scenario_id")
+        if scenario_id is not None and sid != scenario_id:
+            continue
+        if "error" in r:
+            harness_results[sid] = {"passed": 0, "failed": 1, "total": 1,
+                                     "details": [{"criterion": "no error", "passed": False, "detail": r["error"]}]}
+            continue
+
+        criteria = EVALUATION_HARNESS.get(sid, [])
+        details = []
+        passed = 0
+        failed = 0
+        for name, check_fn in criteria:
+            try:
+                ok, detail = check_fn(r)
+            except Exception as exc:
+                ok, detail = False, f"check error: {exc}"
+            details.append({"criterion": name, "passed": ok, "detail": detail})
+            if ok:
+                passed += 1
+            else:
+                failed += 1
+        harness_results[sid] = {"passed": passed, "failed": failed, "total": passed + failed, "details": details}
+
+    return harness_results
+
+
+def render_harness_report(harness_results: dict) -> str:
+    """Render harness results as a readable report."""
+    lines = ["", "=" * 80, "  EVALUATION HARNESS RESULTS", "=" * 80, ""]
+
+    total_passed = 0
+    total_failed = 0
+
+    for sid in sorted(harness_results.keys()):
+        hr = harness_results[sid]
+        total_passed += hr["passed"]
+        total_failed += hr["failed"]
+        status = "PASS" if hr["failed"] == 0 else "FAIL"
+        lines.append(f"  Scenario {sid}: {status} ({hr['passed']}/{hr['total']} criteria)")
+        for d in hr["details"]:
+            mark = "  [+]" if d["passed"] else "  [-]"
+            lines.append(f"    {mark} {d['criterion']}: {d['detail']}")
+        lines.append("")
+
+    lines.append("-" * 80)
+    lines.append(f"  TOTAL: {total_passed} passed, {total_failed} failed, "
+                 f"{total_passed + total_failed} criteria across {len(harness_results)} scenarios")
+    pct = (total_passed / max(1, total_passed + total_failed)) * 100
+    lines.append(f"  PASS RATE: {pct:.0f}%")
+    lines.append("=" * 80)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -439,6 +606,7 @@ def main():
     parser = argparse.ArgumentParser(description="Test DESO cognitive pipeline")
     parser.add_argument("--scenario", type=int, default=0, help="Run single scenario (1-10)")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM tier, test fallback only")
+    parser.add_argument("--harness", action="store_true", help="Run evaluation harness with acceptance criteria")
     args = parser.parse_args()
 
     _load_env()
@@ -511,10 +679,22 @@ def main():
 
     print(f"\nReport saved to: {report_path}")
     print(f"JSON results:    {json_path}")
-    print()
-    # Windows console may not support all chars — force ASCII
-    sys.stdout.buffer.write(_ascii(report).encode("ascii", errors="replace"))
-    sys.stdout.buffer.write(b"\n")
+
+    # WI-1C: Run evaluation harness if requested
+    if args.harness:
+        harness_results = run_harness(results, scenario_id=args.scenario or None)
+        harness_text = render_harness_report(harness_results)
+        print(harness_text)
+
+        harness_path = os.path.join(out_dir, "deso_harness_results.json")
+        with open(harness_path, "w", encoding="utf-8") as f:
+            json.dump(harness_results, f, indent=2, default=str)
+        print(f"Harness results: {harness_path}")
+    else:
+        print()
+        # Windows console may not support all chars — force ASCII
+        sys.stdout.buffer.write(_ascii(report).encode("ascii", errors="replace"))
+        sys.stdout.buffer.write(b"\n")
 
     # Close connections
     domain_conn.close()

@@ -245,6 +245,126 @@ def _heuristic_review(run_meta: dict) -> dict:
     return suggestions
 
 
+# ── 2b. Quality gate + dedup (WI-1E, OB1 pattern: claudeception) ─────────────
+
+def _extract_learned_pattern_notes(md_text: str) -> list[str]:
+    """Extract existing bullet-point notes from the ## Learned Patterns section."""
+    notes: list[str] = []
+    in_section = False
+    for line in md_text.splitlines():
+        if line.strip().startswith("## Learned Patterns"):
+            in_section = True
+            continue
+        if in_section and line.strip().startswith("## ") and "Learned Patterns" not in line:
+            break  # hit the next top-level section
+        if in_section and line.strip().startswith("- "):
+            notes.append(line.strip().lstrip("- ").strip())
+    return notes
+
+
+def _is_duplicate_note(existing_notes: list[str], candidate: str, threshold: float = 0.85) -> bool:
+    """Check if candidate is a near-duplicate of any existing note (difflib SequenceMatcher)."""
+    import difflib
+    candidate_lower = candidate.lower().strip()
+    for existing in existing_notes:
+        ratio = difflib.SequenceMatcher(None, candidate_lower, existing.lower().strip()).ratio()
+        if ratio >= threshold:
+            return True
+    return False
+
+
+def _quality_gate_check(note: str, existing_notes: list[str]) -> str | None:
+    """Run quality gate on a skill note. Returns None if passes, or reason string if rejected."""
+    note_stripped = note.strip()
+
+    # Gate 1: must be non-empty and > 10 chars
+    if len(note_stripped) < 10:
+        return "too_short"
+
+    # Gate 2: must be under 200 words (not 50 — practical limit for domain learnings)
+    if len(note_stripped.split()) > 200:
+        return "too_long"
+
+    # Gate 3: not a duplicate of existing notes
+    if _is_duplicate_note(existing_notes, note_stripped):
+        return "duplicate"
+
+    # Gate 4: has actionable content (contains at least one verb-like word)
+    _ACTION_WORDS = {"check", "verify", "use", "avoid", "prefer", "flag", "detect", "add",
+                     "run", "apply", "ensure", "consider", "watch", "look", "examine",
+                     "analyze", "evaluate", "compute", "compare", "implement", "treat",
+                     "include", "exclude", "drop", "keep", "skip", "always", "never",
+                     "be", "pay", "understand", "review"}
+    words = set(note_stripped.lower().split())
+    if not words & _ACTION_WORDS:
+        return "no_actionable_verb"
+
+    return None  # passes all gates
+
+
+def _deprecate_old_notes(max_notes: int = 30) -> None:
+    """If Learned Patterns has more than max_notes bullet points, remove the oldest ones.
+
+    Oldest = earliest date headers. Removes entire date sections until count <= max_notes.
+    """
+    if not os.path.exists(SKILL_MD_PATH):
+        return
+
+    with open(SKILL_MD_PATH, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    lines = content.splitlines(keepends=True)
+
+    # Find the Learned Patterns section
+    lp_start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("## Learned Patterns"):
+            lp_start = i
+            break
+
+    if lp_start is None:
+        return
+
+    # Count bullet points in the section
+    bullet_count = sum(1 for line in lines[lp_start:] if line.strip().startswith("- "))
+    if bullet_count <= max_notes:
+        return
+
+    # Find date headers (### YYYY-MM-DD) in the section, oldest first
+    date_sections: list[tuple[int, int]] = []  # (start_line, end_line)
+    current_date_start = None
+    for i in range(lp_start + 1, len(lines)):
+        if lines[i].strip().startswith("### ") and len(lines[i].strip()) <= 30:
+            if current_date_start is not None:
+                date_sections.append((current_date_start, i))
+            current_date_start = i
+        elif lines[i].strip().startswith("## ") and "Learned Patterns" not in lines[i]:
+            if current_date_start is not None:
+                date_sections.append((current_date_start, i))
+            break
+    else:
+        if current_date_start is not None:
+            date_sections.append((current_date_start, len(lines)))
+
+    # Remove oldest date sections until bullet count <= max_notes
+    lines_to_remove: set[int] = set()
+    for start, end in date_sections:
+        if bullet_count <= max_notes:
+            break
+        section_bullets = sum(1 for j in range(start, end) if lines[j].strip().startswith("- "))
+        for j in range(start, end):
+            lines_to_remove.add(j)
+        bullet_count -= section_bullets
+
+    if lines_to_remove:
+        new_lines = [line for i, line in enumerate(lines) if i not in lines_to_remove]
+        with open(SKILL_MD_PATH, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        log.info("Self-improver: deprecated %d old note sections (kept %d bullets)",
+                 len(date_sections) - len([s for s in date_sections if s[0] not in lines_to_remove]),
+                 bullet_count)
+
+
 # ── 3. Apply improvements ─────────────────────────────────────────────────────
 
 def _load_overrides() -> dict:
@@ -305,21 +425,39 @@ def apply_improvements(suggestions: dict) -> dict:
         _save_overrides(overrides)
 
     # 3. Append skill notes to SKILL.md (## Learned Patterns section)
+    #    WI-1E: quality gate + dedup + deprecation (OB1 pattern: claudeception)
     notes = suggestions.get("skill_notes", [])
     if notes and os.path.exists(SKILL_MD_PATH):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with open(SKILL_MD_PATH, "r", encoding="utf-8") as fr:
             existing_md = fr.read()
 
-        with open(SKILL_MD_PATH, "a", encoding="utf-8") as fa:
-            if "## Learned Patterns" not in existing_md:
-                fa.write("\n\n---\n\n## Learned Patterns\n\n")
-                fa.write("Auto-updated by `hooks/self_improver.py` after each run.\n")
-            fa.write(f"\n### {today}\n")
-            for note in notes:
-                fa.write(f"- {note}\n")
+        # Extract existing learned pattern bullets for dedup check
+        existing_notes = _extract_learned_pattern_notes(existing_md)
 
-        result["skill_notes_added"] = len(notes)
+        # Quality gate: filter each note
+        accepted_notes = []
+        for note in notes:
+            gate_result = _quality_gate_check(note, existing_notes)
+            if gate_result is None:
+                accepted_notes.append(note)
+            else:
+                log.info("Self-improver: note rejected (%s): %s", gate_result, note[:60])
+
+        if accepted_notes:
+            with open(SKILL_MD_PATH, "a", encoding="utf-8") as fa:
+                if "## Learned Patterns" not in existing_md:
+                    fa.write("\n\n---\n\n## Learned Patterns\n\n")
+                    fa.write("Auto-updated by `hooks/self_improver.py` after each run.\n")
+                fa.write(f"\n### {today}\n")
+                for note in accepted_notes:
+                    fa.write(f"- {note}\n")
+
+            # Deprecate oldest notes if count exceeds 30
+            _deprecate_old_notes(max_notes=30)
+
+        result["skill_notes_added"] = len(accepted_notes)
+        result["skill_notes_rejected"] = len(notes) - len(accepted_notes)
 
     # 4. Queue complex improvements
     pending = suggestions.get("pending_improvements", [])
