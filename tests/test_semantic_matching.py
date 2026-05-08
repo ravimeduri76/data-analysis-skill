@@ -61,7 +61,7 @@ class TestEmbeddingRegistry:
         import embedding_registry
         embedding_registry._MODEL_CACHE.clear()
         embedding_registry._MODEL_CACHE["model"] = None
-        with pytest.raises(RuntimeError, match="BGE-M3 model unavailable"):
+        with pytest.raises(RuntimeError, match="BGE-M3 provider unavailable"):
             embedding_registry.embed_texts(["test"])
 
     def test_cosine_rank_empty_candidates(self):
